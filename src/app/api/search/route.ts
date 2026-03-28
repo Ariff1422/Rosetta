@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { parseQuery, type ParsedSearchQuery, type SearchType } from "@/lib/parse-query";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+export const runtime = "nodejs";
 
 export interface SearchPayload {
-  query: string; // Raw NLP query from user
+  query: string;
 }
 
 export interface PriceResult {
@@ -12,7 +13,7 @@ export interface PriceResult {
   platformInitials: string;
   route: string;
   detail: string;
-  headline: number;   // Advertised "from" price
+  headline: number;
   breakdown: {
     base: number;
     taxes: number;
@@ -20,9 +21,9 @@ export interface PriceResult {
     platformFee?: number;
     serviceFee?: number;
   };
-  total: number;      // True all-in price
+  total: number;
   isBest?: boolean;
-  flags?: string[];   // e.g. "Hidden platform fee", "Fake discount detected"
+  flags?: string[];
 }
 
 export interface SearchResponse {
@@ -31,61 +32,250 @@ export interface SearchResponse {
   searchedAt: string;
 }
 
-// ─── TinyFish targets ────────────────────────────────────────────────────────
-//
-// On hackathon day, populate this list and uncomment the real call below.
-// Each entry is one TinyFish agent invocation.
-//
 const FLIGHT_TARGETS = [
   { url: "https://www.skyscanner.com", name: "Skyscanner", color: "#0770CD", initials: "SK" },
-  { url: "https://flights.google.com",  name: "Google Flights", color: "#4285F4", initials: "GF" },
-  { url: "https://www.kayak.com",       name: "Kayak",          color: "#FF690F", initials: "KY" },
-  { url: "https://www.expedia.com",     name: "Expedia",        color: "#FBBC04", initials: "EX" },
-  { url: "https://www.airasia.com",     name: "AirAsia",        color: "#E60026", initials: "AA" },
-  { url: "https://www.flyscoot.com",    name: "Scoot",          color: "#FFD700", initials: "SC" },
+  { url: "https://flights.google.com", name: "Google Flights", color: "#4285F4", initials: "GF" },
+  { url: "https://www.kayak.com", name: "Kayak", color: "#FF690F", initials: "KY" },
+  { url: "https://www.expedia.com", name: "Expedia", color: "#FBBC04", initials: "EX" },
+  { url: "https://www.airasia.com", name: "AirAsia", color: "#E60026", initials: "AA" },
+  { url: "https://www.flyscoot.com", name: "Scoot", color: "#FFD700", initials: "SC" },
 ];
 
-// ─── Helper: call one TinyFish agent ─────────────────────────────────────────
+const HOTEL_TARGETS = [
+  { url: "https://www.booking.com", name: "Booking.com", color: "#003B95", initials: "BK" },
+  { url: "https://www.agoda.com", name: "Agoda", color: "#7F4FD6", initials: "AG" },
+  { url: "https://www.hotels.com", name: "Hotels.com", color: "#D32F2F", initials: "HT" },
+  { url: "https://www.expedia.com", name: "Expedia Hotels", color: "#FBBC04", initials: "EX" },
+];
 
-async function runTinyFishAgent(
-  url: string,
-  goal: string
-): Promise<string> {
+const CAR_TARGETS = [
+  { url: "https://www.rentalcars.com", name: "Rentalcars", color: "#FDB913", initials: "RC" },
+  { url: "https://www.kayak.com/cars", name: "Kayak Cars", color: "#FF690F", initials: "KY" },
+  { url: "https://www.expedia.com/Cars", name: "Expedia Cars", color: "#FBBC04", initials: "EX" },
+];
+
+type SearchTarget = {
+  url: string;
+  name: string;
+  color: string;
+  initials: string;
+};
+
+type TinyFishRawResult = {
+  base_fare?: number | null;
+  taxes_and_fees?: number | null;
+  baggage_fee?: number | null;
+  platform_service_fee?: number | null;
+  service_fee?: number | null;
+  total_checkout_price?: number | null;
+  airline_name?: string | null;
+  provider_name?: string | null;
+  property_name?: string | null;
+  vehicle_name?: string | null;
+  flight_duration?: string | null;
+  departure_time?: string | null;
+  room_type?: string | null;
+  pickup_time?: string | null;
+  route?: string | null;
+};
+
+type TinyFishStreamEvent = {
+  type: "STARTED" | "STREAMING_URL" | "PROGRESS" | "HEARTBEAT" | "COMPLETE";
+  status?: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  result?: TinyFishRawResult;
+  error?: { message?: string } | string;
+};
+
+type SearchEvent =
+  | { type: "SEARCH_META"; query: string; parsedQuery: ParsedSearchQuery | null; activeTargets: string[] }
+  | { type: "AGENT_START"; platform: string }
+  | { type: "AGENT_DONE"; platform: string; result: PriceResult | null; error?: string }
+  | { type: "SEARCH_DONE"; response: SearchResponse };
+
+function safeNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function inferTypesFromQuery(query: string): SearchType[] {
+  const lower = query.toLowerCase();
+  const types: SearchType[] = [];
+
+  if (/\b(fly|flight|airfare|plane|airport)\b/.test(lower)) {
+    types.push("flights");
+  }
+  if (/\b(hotel|stay|resort|hostel|room|accommodation)\b/.test(lower)) {
+    types.push("hotels");
+  }
+  if (/\b(car|rental|rent a car|vehicle|pickup)\b/.test(lower)) {
+    types.push("cars");
+  }
+
+  return types.length > 0 ? types : ["flights"];
+}
+
+function getTargets(types: SearchType[]) {
+  const targets: SearchTarget[] = [];
+
+  if (types.includes("flights")) targets.push(...FLIGHT_TARGETS);
+  if (types.includes("hotels")) targets.push(...HOTEL_TARGETS);
+  if (types.includes("cars")) targets.push(...CAR_TARGETS);
+
+  return targets;
+}
+
+function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null) {
+  const normalized = parsedQuery?.normalizedQuery || searchQuery;
+
+  return [
+    `Search for the cheapest available travel option that matches this request: "${normalized}".`,
+    parsedQuery?.origin ? `Origin: ${parsedQuery.origin}.` : "",
+    parsedQuery?.destination ? `Destination: ${parsedQuery.destination}.` : "",
+    parsedQuery?.departDate ? `Departure date: ${parsedQuery.departDate}.` : "",
+    parsedQuery?.returnDate ? `Return date: ${parsedQuery.returnDate}.` : "",
+    parsedQuery?.pax ? `Passengers: ${parsedQuery.pax}.` : "",
+    "Navigate until the final checkout summary page before payment.",
+    "Extract the cheapest qualifying option only.",
+    "Return ONLY valid minified JSON with this exact shape:",
+    '{"base_fare":number,"taxes_and_fees":number,"baggage_fee":number,"platform_service_fee":number,"service_fee":number,"total_checkout_price":number,"airline_name":string|null,"provider_name":string|null,"property_name":string|null,"vehicle_name":string|null,"flight_duration":string|null,"departure_time":string|null,"room_type":string|null,"pickup_time":string|null,"route":string|null}',
+    "Use 0 for missing numeric fees and null for unknown strings.",
+    "Do not include markdown, comments, or extra keys.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+async function runTinyFishAgent(url: string, goal: string): Promise<TinyFishRawResult> {
+  if (!process.env.TINYFISH_API_KEY) {
+    throw new Error("TINYFISH_API_KEY is not configured");
+  }
+
   const response = await fetch("https://agent.tinyfish.ai/v1/automation/run-sse", {
     method: "POST",
     headers: {
-      "X-API-Key": process.env.TINYFISH_API_KEY!,
+      "X-API-Key": process.env.TINYFISH_API_KEY,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ url, goal, browser_profile: "stealth" }),
+    body: JSON.stringify({
+      url,
+      goal,
+      browser_profile: "stealth",
+      api_integration: "rosetta",
+    }),
   });
 
-  // SSE stream — collect all data events, return last COMPLETE result
-  const reader = response.body!.getReader();
+  if (!response.ok || !response.body) {
+    throw new Error(`TinyFish request failed with status ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let lastResult = "";
+  let buffer = "";
+  let lastResult: TinyFishRawResult | null = null;
+  let terminalStatus: TinyFishStreamEvent["status"] | null = null;
+  let terminalError: string | null = null;
+
+  const parseMessage = (message: string) => {
+    const dataLine = message
+      .split("\n")
+      .map((line) => line.trimStart())
+      .find((line) => line.startsWith("data: "));
+
+    if (!dataLine) return;
+
+    try {
+      const event = JSON.parse(dataLine.slice(6)) as TinyFishStreamEvent;
+      if (event.type !== "COMPLETE") return;
+
+      terminalStatus = event.status ?? null;
+      if (typeof event.error === "string") {
+        terminalError = event.error;
+      } else if (event.error?.message) {
+        terminalError = event.error.message;
+      }
+
+      if (event.status === "COMPLETED" && event.result) {
+        lastResult = event.result;
+      }
+    } catch {
+      return;
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    const chunk = decoder.decode(value);
-    const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
-    for (const line of lines) {
-      try {
-        const event = JSON.parse(line.slice(6));
-        if (event.type === "COMPLETE" && event.result) {
-          lastResult = JSON.stringify(event.result);
-        }
-      } catch {
-        // partial chunk, skip
-      }
+
+    buffer += decoder.decode(value, { stream: true });
+    const messages = buffer.split("\n\n");
+    buffer = messages.pop() ?? "";
+
+    for (const message of messages) {
+      parseMessage(message);
     }
+  }
+
+  if (buffer.trim()) {
+    parseMessage(buffer);
+  }
+
+  if (terminalStatus && terminalStatus !== "COMPLETED") {
+    throw new Error(terminalError || `TinyFish run ended with status ${terminalStatus}`);
+  }
+
+  if (!lastResult) {
+    throw new Error("TinyFish did not return a COMPLETE result");
   }
 
   return lastResult;
 }
 
-// ─── Route handler ────────────────────────────────────────────────────────────
+function fallbackDetail(raw: TinyFishRawResult) {
+  return raw.property_name || raw.provider_name || raw.airline_name || raw.vehicle_name || "";
+}
+
+function formatResult(target: SearchTarget, raw: TinyFishRawResult): PriceResult {
+  const base = safeNumber(raw.base_fare);
+  const taxes = safeNumber(raw.taxes_and_fees);
+  const baggage = safeNumber(raw.baggage_fee);
+  const platformFee = safeNumber(raw.platform_service_fee);
+  const serviceFee = safeNumber(raw.service_fee);
+  const total = safeNumber(raw.total_checkout_price) || base + taxes + baggage + platformFee + serviceFee;
+  const provider = raw.airline_name || raw.provider_name || raw.property_name || raw.vehicle_name || "";
+
+  const flags: string[] = [];
+  if (platformFee > 0) flags.push(`Hidden platform fee: S$${platformFee}`);
+  if (serviceFee > 0) flags.push(`Service fee added at checkout: S$${serviceFee}`);
+
+  return {
+    platform: provider ? `${target.name} -> ${provider}` : target.name,
+    platformColor: target.color,
+    platformInitials: target.initials,
+    route: raw.route || raw.flight_duration || raw.room_type || raw.vehicle_name || "See checkout details",
+    detail: raw.departure_time || raw.pickup_time || fallbackDetail(raw),
+    headline: base,
+    breakdown: {
+      base,
+      taxes,
+      baggage: baggage || undefined,
+      platformFee: platformFee || undefined,
+      serviceFee: serviceFee || undefined,
+    },
+    total,
+    flags: flags.length > 0 ? flags : undefined,
+  };
+}
+
+function rankResults(results: PriceResult[]) {
+  const ranked = [...results].sort((a, b) => a.total - b.total);
+  if (ranked.length > 0) {
+    ranked[0] = { ...ranked[0], isBest: true };
+  }
+  return ranked;
+}
+
+function encodeEvent(event: SearchEvent) {
+  return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
 
 export async function POST(req: NextRequest) {
   const { query }: SearchPayload = await req.json();
@@ -94,130 +284,76 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Query is required" }, { status: 400 });
   }
 
-  // ── STUB: return mock data while building UI ──────────────────────────────
-  // Delete this block on hackathon day and uncomment the real call below.
-  const STUB_RESULTS: PriceResult[] = [
-    {
-      platform: "Skyscanner → Scoot",
-      platformColor: "#0770CD",
-      platformInitials: "SK",
-      route: "SIN → BKK · Non-stop · 2h 15m",
-      detail: "Departing Apr 18 · Returning Apr 23",
-      headline: 89,
-      breakdown: { base: 89, taxes: 34, baggage: 42, platformFee: 0 },
-      total: 254,
-      isBest: true,
-    },
-    {
-      platform: "Google Flights → AirAsia",
-      platformColor: "#4285F4",
-      platformInitials: "GF",
-      route: "SIN → BKK · Non-stop · 2h 20m",
-      detail: "Departing Apr 18 · Returning Apr 23",
-      headline: 79,
-      breakdown: { base: 79, taxes: 38, baggage: 60, platformFee: 18 },
-      total: 274,
-      flags: ["Hidden platform fee detected"],
-    },
-    {
-      platform: "Expedia → Scoot",
-      platformColor: "#FBBC04",
-      platformInitials: "EX",
-      route: "SIN → BKK · Non-stop · 2h 15m",
-      detail: "Departing Apr 18 · Returning Apr 23",
-      headline: 95,
-      breakdown: { base: 95, taxes: 34, baggage: 42, serviceFee: 24 },
-      total: 290,
-      flags: ['"50% off" — original price set 2 days ago'],
-    },
-  ];
-
-  return NextResponse.json({
-    results: STUB_RESULTS,
-    query,
-    searchedAt: new Date().toISOString(),
-  } satisfies SearchResponse);
-  // ── END STUB ───────────────────────────────────────────────────────────────
-
-
-  /* ── REAL CALL (uncomment on hackathon day) ────────────────────────────────
-
-  // Build a structured goal from the NLP query
-  // TODO: use OpenAI to parse query → { origin, destination, departDate, returnDate, pax }
-  const goal = `
-    Search for flights matching this travel request: "${query}".
-    Navigate to the flight search results, select the cheapest available option,
-    proceed to checkout WITHOUT purchasing, and extract:
-    - base_fare (per person, numeric)
-    - taxes_and_fees (total, numeric)
-    - baggage_fee (if any, numeric, else 0)
-    - platform_service_fee (if any, numeric, else 0)
-    - total_checkout_price (numeric)
-    - airline_name (string)
-    - flight_duration (string)
-    - departure_time (string)
-    Return ONLY valid JSON in this exact shape:
-    { base_fare, taxes_and_fees, baggage_fee, platform_service_fee, total_checkout_price, airline_name, flight_duration, departure_time }
-  `;
-
-  // Run all agents in parallel
-  const settled = await Promise.allSettled(
-    FLIGHT_TARGETS.map((t) => runTinyFishAgent(t.url, goal))
-  );
-
-  const results: PriceResult[] = settled
-    .map((outcome, i) => {
-      if (outcome.status === "rejected") return null;
-      try {
-        const raw = JSON.parse(outcome.value);
-        const total =
-          (raw.base_fare ?? 0) +
-          (raw.taxes_and_fees ?? 0) +
-          (raw.baggage_fee ?? 0) +
-          (raw.platform_service_fee ?? 0);
-        const flags: string[] = [];
-        if ((raw.platform_service_fee ?? 0) > 0)
-          flags.push(`Hidden platform fee: S$${raw.platform_service_fee}`);
-        const target = FLIGHT_TARGETS[i];
-        return {
-          platform: `${target.name} → ${raw.airline_name ?? ""}`.trim(),
-          platformColor: target.color,
-          platformInitials: target.initials,
-          route: `${raw.flight_duration ?? ""} · Non-stop`,
-          detail: raw.departure_time ?? "",
-          headline: raw.base_fare ?? 0,
-          breakdown: {
-            base: raw.base_fare ?? 0,
-            taxes: raw.taxes_and_fees ?? 0,
-            baggage: raw.baggage_fee,
-            platformFee: raw.platform_service_fee,
-          },
-          total,
-          flags,
-        } satisfies PriceResult;
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean) as PriceResult[];
-
-  // Mark cheapest as best
-  if (results.length > 0) {
-    const minIdx = results.reduce(
-      (best, r, i) => (r.total < results[best].total ? i : best),
-      0
-    );
-    results[minIdx].isBest = true;
+  let parsedQuery: ParsedSearchQuery | null = null;
+  try {
+    parsedQuery = await parseQuery(query);
+  } catch {
+    parsedQuery = null;
   }
 
-  // Sort cheapest first
-  results.sort((a, b) => a.total - b.total);
+  const activeTypes = parsedQuery?.types?.length ? parsedQuery.types : inferTypesFromQuery(query);
+  const activeTargets = getTargets(activeTypes);
+  const goal = buildPrompt(parsedQuery?.normalizedQuery || query, parsedQuery);
 
-  return NextResponse.json({
-    results,
-    query,
-    searchedAt: new Date().toISOString(),
-  } satisfies SearchResponse);
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      const results: PriceResult[] = [];
 
-  ── END REAL CALL ─────────────────────────────────────────────────────────── */
+      controller.enqueue(
+        encoder.encode(
+          encodeEvent({
+            type: "SEARCH_META",
+            query,
+            parsedQuery,
+            activeTargets: activeTargets.map((target) => target.name),
+          }),
+        ),
+      );
+
+      await Promise.all(
+        activeTargets.map(async (target) => {
+          controller.enqueue(encoder.encode(encodeEvent({ type: "AGENT_START", platform: target.name })));
+
+          try {
+            const raw = await runTinyFishAgent(target.url, goal);
+            const result = formatResult(target, raw);
+            results.push(result);
+
+            controller.enqueue(
+              encoder.encode(encodeEvent({ type: "AGENT_DONE", platform: target.name, result })),
+            );
+          } catch (error) {
+            controller.enqueue(
+              encoder.encode(
+                encodeEvent({
+                  type: "AGENT_DONE",
+                  platform: target.name,
+                  result: null,
+                  error: error instanceof Error ? error.message : "Unknown TinyFish error",
+                }),
+              ),
+            );
+          }
+        }),
+      );
+
+      const response: SearchResponse = {
+        results: rankResults(results),
+        query,
+        searchedAt: new Date().toISOString(),
+      };
+
+      controller.enqueue(encoder.encode(encodeEvent({ type: "SEARCH_DONE", response })));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 }
