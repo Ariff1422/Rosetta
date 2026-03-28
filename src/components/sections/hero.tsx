@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, Fragment } from "react";
-import { Search, Plane, Hotel, Car, ShieldCheck, Activity, Clock, DollarSign } from "lucide-react";
+import { motion } from "framer-motion";
+import { Search, Plane, Hotel, Car, ShieldCheck, Activity, Clock, DollarSign, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useSearchHistory } from "@/hooks/use-search-history";
 
 const EXAMPLES = [
   { icon: Plane, label: "✈ SG → Tokyo, 2 pax, June" },
@@ -26,34 +28,61 @@ const TRUST = [
 
 export function Hero({ onSearch }: { onSearch?: (query: string) => void }) {
   const [query, setQuery] = useState("");
+  const { history, push } = useSearchHistory();
 
   const handleSearch = () => {
-    if (query.trim() && onSearch) onSearch(query.trim());
+    if (!query.trim() || !onSearch) return;
+    push(query.trim());
+    onSearch(query.trim());
+  };
+
+  const fillQuery = (q: string) => {
+    setQuery(q);
   };
 
   return (
     <section>
-      <div className="mx-auto max-w-4xl px-12 pb-12 pt-6 text-center">
+      <div className="mx-auto max-w-4xl px-6 pb-12 pt-6 text-center md:px-12">
         {/* Badge */}
-        <div className="mb-7 inline-flex items-center gap-2 rounded-full bg-primary/10 px-3.5 py-1.5 text-sm font-medium text-primary">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0 }}
+          className="mb-7 inline-flex items-center gap-2 rounded-full bg-primary/10 px-3.5 py-1.5 text-sm font-medium text-primary"
+        >
           <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
           Powered by AI web agents
-        </div>
+        </motion.div>
 
         {/* Headline */}
-        <h1 className="font-serif mb-5 text-[clamp(36px,5vw,58px)] font-bold leading-[1.1] tracking-[-1.5px] text-foreground">
+        <motion.h1
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.15 }}
+          className="font-serif mb-5 text-[clamp(36px,5vw,58px)] font-bold leading-[1.1] tracking-[-1.5px] text-foreground"
+        >
           The price you see is<br />never the price you{" "}
           <em className="not-italic text-primary">pay.</em>
-        </h1>
+        </motion.h1>
 
-        <p className="mx-auto mb-12 max-w-[560px] text-lg font-light leading-relaxed text-muted-foreground">
+        <motion.p
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.3 }}
+          className="mx-auto mb-12 max-w-[560px] text-lg font-light leading-relaxed text-muted-foreground"
+        >
           Describe your trip in plain English. Rosetta sends AI agents to every
           booking site, navigates all the way to checkout, and shows you the true
           all-in price — before you waste time finding out at the end.
-        </p>
+        </motion.p>
 
         {/* Search box */}
-        <div className="mx-auto max-w-[760px] rounded-3xl border border-border bg-card p-6 shadow-[0_8px_40px_rgba(0,0,0,0.1)] text-left">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.45 }}
+          className="mx-auto max-w-[760px] rounded-3xl border border-border bg-card p-6 shadow-[0_8px_40px_rgba(0,0,0,0.1)] text-left"
+        >
           <span className="mb-2.5 block text-[11px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">
             Describe your trip
           </span>
@@ -67,12 +96,12 @@ export function Hero({ onSearch }: { onSearch?: (query: string) => void }) {
             className="min-h-[100px] resize-none rounded-xl border-border bg-background px-4 py-4 text-sm leading-relaxed focus-visible:ring-primary placeholder:text-muted-foreground/50"
             rows={3}
           />
-          <div className="mt-4 flex items-center justify-between gap-3">
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap gap-2">
               {EXAMPLES.map(({ label }) => (
                 <button
                   key={label}
-                  onClick={() => setQuery(label.replace(/^[^\s]+ /, ""))}
+                  onClick={() => fillQuery(label.replace(/^[^\s]+ /, ""))}
                   className="rounded-full border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
                 >
                   {label}
@@ -89,7 +118,28 @@ export function Hero({ onSearch }: { onSearch?: (query: string) => void }) {
               Find true price
             </Button>
           </div>
-        </div>
+
+          {/* Recent searches */}
+          {history.length > 0 && (
+            <div className="mt-4 border-t border-border/50 pt-4">
+              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+                <History className="h-3 w-3" />
+                Recent
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {history.map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => fillQuery(q)}
+                    className="max-w-[240px] truncate rounded-full border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </motion.div>
       </div>
 
       {/* Trust row */}

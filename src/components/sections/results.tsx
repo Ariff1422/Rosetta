@@ -45,6 +45,7 @@ interface SearchResponse {
   results: Result[];
   query?: string;
   searchedAt?: string;
+  error?: string;
 }
 
 interface SearchMetaEvent {
@@ -434,7 +435,16 @@ export function Results({ query }: { query: string }) {
         });
 
         if (!response.ok) {
-          throw new Error(`Search failed with status ${response.status}`);
+          let message = `Search failed with status ${response.status}`;
+          try {
+            const payload = (await response.json()) as { error?: string };
+            if (payload.error) {
+              message = payload.error;
+            }
+          } catch {
+            // Ignore JSON parsing errors and keep the status fallback.
+          }
+          throw new Error(message);
         }
 
         const contentType = response.headers.get("content-type") ?? "";
@@ -459,20 +469,35 @@ export function Results({ query }: { query: string }) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        // Cancel the reader if no data arrives within 90 seconds (backend timeout is 60s per agent)
+        const STREAM_IDLE_TIMEOUT_MS = 90_000;
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        const resetIdleTimer = () => {
+          if (idleTimer) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => reader.cancel("stream idle timeout"), STREAM_IDLE_TIMEOUT_MS);
+        };
 
-          buffer += decoder.decode(value, { stream: true });
-          const blocks = buffer.split("\n\n");
-          buffer = blocks.pop() ?? "";
+        resetIdleTimer();
 
-          for (const block of blocks) {
-            const parsed = parseSseBlock(block);
-            if (!parsed) continue;
-            applyStreamEvent(parsed.payload, setAgents, setResults, setError, setHasCompleted);
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            resetIdleTimer();
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split("\n\n");
+            buffer = blocks.pop() ?? "";
+
+            for (const block of blocks) {
+              const parsed = parseSseBlock(block);
+              if (!parsed) continue;
+              applyStreamEvent(parsed.payload, setAgents, setResults, setError, setHasCompleted);
+            }
           }
+        } finally {
+          if (idleTimer) clearTimeout(idleTimer);
         }
 
         if (buffer.trim()) {
@@ -483,7 +508,13 @@ export function Results({ query }: { query: string }) {
         }
       } catch (err) {
         if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "Unable to fetch results.");
+        // Ignore idle timeout cancellations — we already have whatever results arrived
+        const message = err instanceof Error ? err.message : String(err);
+        if (message === "stream idle timeout") {
+          setHasCompleted(true);
+        } else {
+          setError(message || "Unable to fetch results.");
+        }
       } finally {
         if (!controller.signal.aborted) {
           setIsLoading(false);
@@ -495,8 +526,8 @@ export function Results({ query }: { query: string }) {
     return () => controller.abort();
   }, [query]);
 
-  const doneCount = agents.filter((agent) => agent.status === "done").length;
-  const allDone = agents.length > 0 && agents.every((agent) => agent.status === "done" || agent.status === "error") && !isLoading;
+  const doneCount = agents.filter((agent) => agent.status === "done" || agent.status === "error").length;
+  const allDone = hasCompleted || (agents.length > 0 && agents.every((agent) => agent.status === "done" || agent.status === "error") && !isLoading);
   const bestTotal = results[0]?.total ?? 0;
   const worstTotal = results[results.length - 1]?.total ?? bestTotal;
   const cheapestHeadlineResult = useMemo(

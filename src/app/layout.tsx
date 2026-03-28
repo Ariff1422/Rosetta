@@ -3,7 +3,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/ui/theme-provider";
 
 export const metadata: Metadata = {
-  title: "Rosetta — The real price, before you click",
+  title: "Rosetta — Decode the real price",
   description:
     "AI agents navigate every booking site to the checkout screen and show you the true all-in price. No surprises.",
   keywords: ["travel", "price comparison", "flights", "hotels", "hidden fees"],
