@@ -1,15 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { ArrowRight, Plane, Hotel, Car } from "lucide-react";
+import { useState, Fragment } from "react";
+import { Search, Plane, Hotel, Car, ShieldCheck, Activity, Clock, DollarSign } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
 
 const EXAMPLES = [
-  { icon: Plane, label: "Singapore → Tokyo, 2 pax, June" },
-  { icon: Hotel, label: "Bali resort, 1 week, July" },
-  { icon: Car,   label: "Car hire in KL, 3 days" },
+  { icon: Plane, label: "✈ SG → Tokyo, 2 pax, June" },
+  { icon: Hotel, label: "🏨 Bali resort, 1 week" },
+  { icon: Car,   label: "🚗 Rent a car in KL" },
 ];
 
 const PLATFORMS = [
@@ -18,160 +17,114 @@ const PLATFORMS = [
   "AirAsia", "Scoot", "Singapore Airlines", "Jetstar",
 ];
 
+const TRUST = [
+  { icon: ShieldCheck, label: "No account needed to compare" },
+  { icon: Activity,    label: "Live data, not cached prices" },
+  { icon: Clock,       label: "Results in under 60 seconds" },
+  { icon: DollarSign,  label: "Free for 5 searches/month" },
+];
+
 export function Hero({ onSearch }: { onSearch?: (query: string) => void }) {
   const [query, setQuery] = useState("");
-  const [focused, setFocused] = useState(false);
 
   const handleSearch = () => {
     if (query.trim() && onSearch) onSearch(query.trim());
   };
 
   return (
-    <section className="relative overflow-hidden">
-      {/* Subtle grain texture overlay */}
-      <div
-        className="pointer-events-none absolute inset-0 opacity-[0.025]"
-        style={{
-          backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E")`,
-          backgroundRepeat: "repeat",
-          backgroundSize: "128px",
-        }}
-      />
-
-      <div className="mx-auto max-w-5xl px-6 pb-20 pt-8 md:pt-12">
-        {/* Eyebrow */}
-        <div className="mb-10 flex items-center justify-center gap-3">
-          <div className="h-px w-12 bg-primary/40" />
-          <span className="text-xs font-medium uppercase tracking-[0.25em] text-primary">
-            Powered by TinyFish AI web agents
-          </span>
-          <div className="h-px w-12 bg-primary/40" />
+    <section>
+      <div className="mx-auto max-w-4xl px-12 pb-12 pt-6 text-center">
+        {/* Badge */}
+        <div className="mb-7 inline-flex items-center gap-2 rounded-full bg-primary/10 px-3.5 py-1.5 text-sm font-medium text-primary">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+          Powered by AI web agents
         </div>
 
-        {/* Headline — the centrepiece */}
-        <h1 className="font-serif mx-auto mb-8 max-w-3xl text-center text-5xl leading-[1.1] text-foreground md:text-6xl lg:text-7xl">
-          The price you see is{" "}
-          <span className="relative inline-block">
-            {/* Italic serif "never" in terracotta */}
-            <span className="italic text-primary">never</span>
-            {/* Wavy underline drawn in SVG — handcrafted feel */}
-            <svg
-              className="absolute -bottom-1 left-0 w-full overflow-visible"
-              height="8"
-              viewBox="0 0 100 8"
-              preserveAspectRatio="none"
-              aria-hidden
-            >
-              <path
-                d="M0,5 C15,1 30,8 50,4 C70,0 85,7 100,3"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                className="text-primary/50"
-              />
-            </svg>
-          </span>{" "}
-          the price you pay.
+        {/* Headline */}
+        <h1 className="font-serif mb-5 text-[clamp(36px,5vw,58px)] font-bold leading-[1.1] tracking-[-1.5px] text-foreground">
+          The price you see is<br />never the price you{" "}
+          <em className="not-italic text-primary">pay.</em>
         </h1>
 
-        <p className="mx-auto mb-14 max-w-xl text-center text-lg leading-relaxed text-muted-foreground">
-          Describe your trip in plain English. Our agents navigate every booking
-          site all the way to checkout and surface the{" "}
-          <span className="font-medium text-foreground">true all-in cost</span>.
+        <p className="mx-auto mb-12 max-w-[560px] text-lg font-light leading-relaxed text-muted-foreground">
+          Describe your trip in plain English. Rosetta sends AI agents to every
+          booking site, navigates all the way to checkout, and shows you the true
+          all-in price — before you waste time finding out at the end.
         </p>
 
-        {/* Search box — clean, confident */}
-        <div className="mx-auto max-w-2xl">
-          <div
-            className={cn(
-              "relative rounded-2xl bg-card transition-all duration-200",
-              focused
-                ? "shadow-[0_0_0_2px] shadow-primary ring-0"
-                : "shadow-[0_2px_24px_-4px] shadow-foreground/12 ring-1 ring-border"
-            )}
-          >
-            <Textarea
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSearch();
-              }}
-              placeholder="Where are you going? Flights, hotels, cars — just describe your trip…"
-              className="min-h-[90px] resize-none rounded-2xl rounded-b-none border-0 bg-transparent px-5 pt-5 pb-3 text-base focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground/40"
-              rows={3}
-            />
-
-            {/* Bottom action bar */}
-            <div className="flex items-center justify-between gap-3 rounded-b-2xl border-t border-border/60 bg-secondary/30 px-4 py-3">
-              <div className="flex flex-wrap gap-1.5">
-                {EXAMPLES.map(({ icon: Icon, label }) => (
-                  <button
-                    key={label}
-                    onClick={() => setQuery(label)}
-                    className="flex items-center gap-1.5 rounded-full bg-background px-3 py-1 text-xs text-muted-foreground ring-1 ring-border transition-all hover:ring-primary/40 hover:text-foreground"
-                  >
-                    <Icon className="h-3 w-3 shrink-0" />
-                    <span className="hidden sm:inline">{label}</span>
-                  </button>
-                ))}
-              </div>
-
-              <Button
-                onClick={handleSearch}
-                disabled={!query.trim()}
-                className="shrink-0 gap-2 rounded-xl"
-              >
-                Search
-                <ArrowRight className="h-4 w-4" />
-              </Button>
+        {/* Search box */}
+        <div className="mx-auto max-w-[760px] rounded-3xl border border-border bg-card p-6 shadow-[0_8px_40px_rgba(0,0,0,0.1)] text-left">
+          <span className="mb-2.5 block text-[11px] font-semibold uppercase tracking-[0.8px] text-muted-foreground">
+            Describe your trip
+          </span>
+          <Textarea
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSearch();
+            }}
+            placeholder="e.g. I want to fly from Singapore to Bangkok in mid April, 2 people, 5 nights. Need a hotel near the city centre, maybe a car rental for day trips too."
+            className="min-h-[100px] resize-none rounded-xl border-border bg-background px-4 py-4 text-sm leading-relaxed focus-visible:ring-primary placeholder:text-muted-foreground/50"
+            rows={3}
+          />
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              {EXAMPLES.map(({ label }) => (
+                <button
+                  key={label}
+                  onClick={() => setQuery(label.replace(/^[^\s]+ /, ""))}
+                  className="rounded-full border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          </div>
-
-          <p className="mt-3 text-center text-xs text-muted-foreground/60">
-            Ctrl + Enter to search
-          </p>
-        </div>
-
-        {/* Stats */}
-        <div className="mt-16 flex flex-wrap items-center justify-center gap-x-10 gap-y-4">
-          {[
-            { val: "< 60s", label: "True price returned" },
-            { val: "20+", label: "Sites searched simultaneously" },
-            { val: "100%", label: "Live checkout data" },
-          ].map(({ val, label }) => (
-            <div key={label} className="flex items-baseline gap-2">
-              <span className="font-serif text-2xl text-foreground">{val}</span>
-              <span className="text-sm text-muted-foreground">{label}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* Platform list */}
-        <div className="mt-10 flex flex-col items-center gap-3">
-          <p className="text-xs text-muted-foreground/60 uppercase tracking-widest">
-            Comparing prices across
-          </p>
-          <div className="flex flex-wrap justify-center gap-2">
-            {PLATFORMS.map((p) => (
-              <span
-                key={p}
-                className="rounded-full bg-secondary px-3 py-1 text-xs text-muted-foreground"
-              >
-                {p}
-              </span>
-            ))}
-            <span className="rounded-full bg-secondary px-3 py-1 text-xs font-medium text-primary">
-              +8 more
-            </span>
+            <Button
+              onClick={handleSearch}
+              disabled={!query.trim()}
+              size="default"
+              className="shrink-0 gap-2"
+            >
+              <Search className="h-4 w-4" />
+              Find true price
+            </Button>
           </div>
         </div>
       </div>
 
-      {/* Bottom edge divider — diagonal */}
-      <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
+      {/* Trust row */}
+      <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 pb-16 px-12">
+        {TRUST.map(({ icon: Icon, label }, i) => (
+          <Fragment key={label}>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Icon className="h-4 w-4 text-success" />
+              {label}
+            </div>
+            {i < TRUST.length - 1 && (
+              <div className="hidden h-4 w-px bg-border md:block" />
+            )}
+          </Fragment>
+        ))}
+      </div>
+
+      {/* Platform list */}
+      <div className="border-t border-border/50 bg-secondary/20 py-4">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-2 px-6">
+          <span className="mr-2 text-xs uppercase tracking-widest text-muted-foreground/60">
+            Comparing across
+          </span>
+          {PLATFORMS.map((p) => (
+            <span key={p} className="rounded-full bg-background px-3 py-1 text-xs text-muted-foreground border border-border">
+              {p}
+            </span>
+          ))}
+          <span className="rounded-full bg-background px-3 py-1 text-xs font-medium text-primary border border-primary/30">
+            +8 more
+          </span>
+        </div>
+      </div>
+
+      <div className="h-px bg-border/50" />
     </section>
   );
 }

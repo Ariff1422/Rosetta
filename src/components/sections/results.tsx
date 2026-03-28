@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -9,8 +9,8 @@ import {
   Loader2,
   TrendingDown,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 type AgentStatus = "pending" | "scanning" | "done" | "error";
@@ -47,40 +47,60 @@ interface SearchResponse {
   searchedAt?: string;
 }
 
-interface StreamEventPayload {
-  type?: string;
-  event?: string;
-  agent?: string;
-  platform?: string;
-  result?: Result;
-  results?: Result[];
-  data?: unknown;
-  message?: string;
+interface SearchMetaEvent {
+  type: "SEARCH_META";
+  query: string;
+  activeTargets?: string[];
 }
+
+interface AgentStartEvent {
+  type: "AGENT_START";
+  platform: string;
+}
+
+interface AgentDoneEvent {
+  type: "AGENT_DONE";
+  platform: string;
+  result: Result | null;
+  error?: string;
+}
+
+interface SearchDoneEvent {
+  type: "SEARCH_DONE";
+  response: SearchResponse;
+}
+
+type StreamEventPayload =
+  | SearchMetaEvent
+  | AgentStartEvent
+  | AgentDoneEvent
+  | SearchDoneEvent
+  | {
+      type?: string;
+      event?: string;
+      platform?: string;
+      message?: string;
+      results?: Result[];
+      result?: Result | null;
+    };
 
 const INITIAL_SKELETON_COUNT = 3;
 
 function normalizeResults(results: Result[]): Result[] {
   const sorted = [...results].sort((a, b) => a.total - b.total);
-  let bestAssigned = false;
 
-  return sorted.map((result, index) => {
-    const isBest = result.isBest || (!bestAssigned && index === 0);
-    if (isBest) bestAssigned = true;
-
-    return {
-      ...result,
-      isBest,
-      flags: result.flags ?? [],
-      breakdown: {
-        base: result.breakdown?.base ?? 0,
-        taxes: result.breakdown?.taxes ?? 0,
-        baggage: result.breakdown?.baggage,
-        platformFee: result.breakdown?.platformFee,
-        serviceFee: result.breakdown?.serviceFee,
-      },
-    };
-  });
+  return sorted.map((result, index) => ({
+    ...result,
+    isBest: index === 0,
+    flags: result.flags ?? [],
+    breakdown: {
+      base: result.breakdown?.base ?? 0,
+      taxes: result.breakdown?.taxes ?? 0,
+      baggage: result.breakdown?.baggage,
+      platformFee: result.breakdown?.platformFee,
+      serviceFee: result.breakdown?.serviceFee,
+    },
+  }));
 }
 
 function upsertAgent(list: Agent[], name: string, status: AgentStatus) {
@@ -96,8 +116,7 @@ function upsertAgent(list: Agent[], name: string, status: AgentStatus) {
 }
 
 function upsertResult(list: Result[], nextResult: Result) {
-  const nextKey = nextResult.platform;
-  const filtered = list.filter((item) => item.platform !== nextKey);
+  const filtered = list.filter((item) => item.platform !== nextResult.platform);
   return normalizeResults([...filtered, nextResult]);
 }
 
@@ -116,6 +135,7 @@ function parseSseBlock(block: string) {
   if (dataLines.length === 0) return null;
 
   const rawData = dataLines.join("\n");
+
   try {
     const parsed = JSON.parse(rawData) as StreamEventPayload;
     return {
@@ -123,61 +143,67 @@ function parseSseBlock(block: string) {
       payload: parsed,
     };
   } catch {
-    return {
-      type: eventName || "message",
-      payload: { data: rawData } satisfies StreamEventPayload,
-    };
+    return null;
   }
 }
 
 function applyStreamEvent(
   payload: StreamEventPayload,
-  setAgents: React.Dispatch<React.SetStateAction<Agent[]>>,
-  setResults: React.Dispatch<React.SetStateAction<Result[]>>,
-  setError: React.Dispatch<React.SetStateAction<string | null>>
+  setAgents: Dispatch<SetStateAction<Agent[]>>,
+  setResults: Dispatch<SetStateAction<Result[]>>,
+  setError: Dispatch<SetStateAction<string | null>>,
+  setHasCompleted: Dispatch<SetStateAction<boolean>>
 ) {
   const type = (payload.type ?? payload.event ?? "").toUpperCase();
-  const agentName =
-    typeof payload.agent === "string"
-      ? payload.agent
-      : typeof payload.platform === "string"
-        ? payload.platform
-        : "";
 
-  if (type === "AGENT_START") {
-    setAgents((current) => upsertAgent(current, agentName, "scanning"));
+  if (type === "SEARCH_META" && "activeTargets" in payload) {
+    const targets = payload.activeTargets ?? [];
+    setAgents(targets.map((name) => ({ name, status: "pending" as AgentStatus })));
     return;
   }
 
-  if (type === "AGENT_DONE") {
-    setAgents((current) => upsertAgent(current, agentName, "done"));
-    if (payload.result) setResults((current) => upsertResult(current, payload.result!));
+  const platform = "platform" in payload && typeof payload.platform === "string"
+    ? payload.platform
+    : "";
+  const agentError = "error" in payload && typeof payload.error === "string"
+    ? payload.error
+    : undefined;
+  const agentResult = "result" in payload ? payload.result : undefined;
+
+  if (type === "AGENT_START" && platform) {
+    setAgents((current) => upsertAgent(current, platform, "scanning"));
     return;
   }
 
-  if (type === "AGENT_ERROR") {
-    setAgents((current) => upsertAgent(current, agentName, "error"));
-    return;
-  }
-
-  if (type === "RESULT" && payload.result) {
-    setResults((current) => upsertResult(current, payload.result!));
-    return;
-  }
-
-  if (type === "RESULTS" && Array.isArray(payload.results)) {
-    setResults(normalizeResults(payload.results));
-    setAgents(
-      payload.results.map((result) => ({
-        name: result.platform,
-        status: "done" as AgentStatus,
-      }))
+  if (type === "AGENT_DONE" && platform) {
+    setAgents((current) =>
+      upsertAgent(current, platform, agentError ? "error" : "done")
     );
+
+    if (agentResult) {
+      setResults((current) => upsertResult(current, agentResult as Result));
+    }
+
+    if (agentError) {
+      setError((current) => current ?? agentError ?? "Search failed.");
+    }
+    return;
+  }
+
+  if (type === "SEARCH_DONE" && "response" in payload) {
+    setResults(normalizeResults(payload.response.results ?? []));
+    setHasCompleted(true);
+    return;
+  }
+
+  if (type === "RESULTS" && "results" in payload && Array.isArray(payload.results)) {
+    setResults(normalizeResults(payload.results));
+    setHasCompleted(true);
     return;
   }
 
   if (type === "ERROR") {
-    setError(payload.message ?? "Search failed.");
+    setError("message" in payload && payload.message ? payload.message : "Search failed.");
   }
 }
 
@@ -368,7 +394,11 @@ function ResultCard({
               {premiumVsBest > 0 ? `S$${premiumVsBest} more than the best deal` : "Best total price"}
             </div>
           )}
-          <Button variant={result.isBest ? "default" : "outline"} size="sm" className="gap-1.5 self-start sm:self-auto">
+          <Button
+            variant={result.isBest ? "default" : "outline"}
+            size="sm"
+            className="gap-1.5 self-start sm:self-auto"
+          >
             Book now
             <ExternalLink className="h-3.5 w-3.5" />
           </Button>
@@ -411,14 +441,14 @@ export function Results({ query }: { query: string }) {
 
         if (contentType.includes("application/json")) {
           const payload = (await response.json()) as SearchResponse;
-          const normalized = normalizeResults(payload.results ?? []);
-          setResults(normalized);
+          setResults(normalizeResults(payload.results ?? []));
           setAgents(
-            normalized.map((result) => ({
+            (payload.results ?? []).map((result) => ({
               name: result.platform,
               status: "done" as AgentStatus,
             }))
           );
+          setHasCompleted(true);
           return;
         }
 
@@ -441,13 +471,15 @@ export function Results({ query }: { query: string }) {
           for (const block of blocks) {
             const parsed = parseSseBlock(block);
             if (!parsed) continue;
-            applyStreamEvent(parsed.payload, setAgents, setResults, setError);
+            applyStreamEvent(parsed.payload, setAgents, setResults, setError, setHasCompleted);
           }
         }
 
         if (buffer.trim()) {
           const parsed = parseSseBlock(buffer);
-          if (parsed) applyStreamEvent(parsed.payload, setAgents, setResults, setError);
+          if (parsed) {
+            applyStreamEvent(parsed.payload, setAgents, setResults, setError, setHasCompleted);
+          }
         }
       } catch (err) {
         if (controller.signal.aborted) return;
@@ -455,7 +487,6 @@ export function Results({ query }: { query: string }) {
       } finally {
         if (!controller.signal.aborted) {
           setIsLoading(false);
-          setHasCompleted(true);
         }
       }
     }
@@ -465,7 +496,7 @@ export function Results({ query }: { query: string }) {
   }, [query]);
 
   const doneCount = agents.filter((agent) => agent.status === "done").length;
-  const allDone = agents.length > 0 && doneCount === agents.length && !isLoading;
+  const allDone = agents.length > 0 && agents.every((agent) => agent.status === "done" || agent.status === "error") && !isLoading;
   const bestTotal = results[0]?.total ?? 0;
   const worstTotal = results[results.length - 1]?.total ?? bestTotal;
   const cheapestHeadlineResult = useMemo(
@@ -508,7 +539,11 @@ export function Results({ query }: { query: string }) {
             )}
           </div>
           <span className="text-xs tabular-nums text-muted-foreground">
-            {agents.length > 0 ? `${doneCount} / ${agents.length}` : isLoading ? "…" : "0 / 0"}
+            {agents.length > 0
+              ? `${doneCount} / ${agents.length}`
+              : isLoading
+                ? "…"
+                : "0 / 0"}
           </span>
         </div>
 
@@ -516,7 +551,12 @@ export function Results({ query }: { query: string }) {
           <div
             className="h-full rounded-full bg-primary transition-all duration-700"
             style={{
-              width: agents.length > 0 ? `${(doneCount / agents.length) * 100}%` : isLoading ? "12%" : "0%",
+              width:
+                agents.length > 0
+                  ? `${(doneCount / agents.length) * 100}%`
+                  : isLoading
+                    ? "12%"
+                    : "0%",
             }}
           />
         </div>
@@ -535,7 +575,7 @@ export function Results({ query }: { query: string }) {
       </div>
 
       {error ? (
-        <div className="rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">
+        <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">
           {error}
         </div>
       ) : null}
@@ -543,12 +583,8 @@ export function Results({ query }: { query: string }) {
       {(isLoading || hasCompleted || results.length > 0) && (
         <div className="space-y-4">
           <div className="flex flex-col gap-2 pb-1 sm:flex-row sm:items-baseline sm:justify-between">
-            <h2 className="font-serif text-xl text-foreground">
-              Live search results
-            </h2>
-            <span className="text-sm text-muted-foreground">
-              Ranked by true price
-            </span>
+            <h2 className="font-serif text-xl text-foreground">Live search results</h2>
+            <span className="text-sm text-muted-foreground">Ranked by true price</span>
           </div>
 
           <AnimatePresence initial={false}>
@@ -577,12 +613,10 @@ export function Results({ query }: { query: string }) {
 
           {!isLoading && cheapestHeadlineResult && insightDelta > 0 ? (
             <div className="mt-2 rounded-xl border border-border bg-secondary/30 p-4 text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">
-                The cheapest-looking option
-              </span>{" "}
+              <span className="font-medium text-foreground">The cheapest-looking option</span>{" "}
               ({cheapestHeadlineResult.platform} at S${cheapestHeadlineResult.headline * 2}) costs{" "}
-              <span className="font-medium text-destructive">S${insightDelta} more</span>{" "}
-              at checkout than the best deal.
+              <span className="font-medium text-destructive">S${insightDelta} more</span> at
+              checkout than the best deal.
             </div>
           ) : null}
         </div>
