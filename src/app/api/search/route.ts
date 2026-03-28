@@ -32,6 +32,9 @@ export interface SearchResponse {
   searchedAt: string;
 }
 
+const MAX_TARGETS_PER_SEARCH = 3;
+const AGENT_TIMEOUT_MS = 45_000;
+
 const FLIGHT_TARGETS = [
   { url: "https://www.skyscanner.com", name: "Skyscanner", color: "#0770CD", initials: "SK" },
   { url: "https://flights.google.com", name: "Google Flights", color: "#4285F4", initials: "GF" },
@@ -120,7 +123,7 @@ function getTargets(types: SearchType[]) {
   if (types.includes("hotels")) targets.push(...HOTEL_TARGETS);
   if (types.includes("cars")) targets.push(...CAR_TARGETS);
 
-  return targets;
+  return targets.slice(0, MAX_TARGETS_PER_SEARCH);
 }
 
 function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null) {
@@ -149,84 +152,97 @@ async function runTinyFishAgent(url: string, goal: string): Promise<TinyFishRawR
     throw new Error("TINYFISH_API_KEY is not configured");
   }
 
-  const response = await fetch("https://agent.tinyfish.ai/v1/automation/run-sse", {
-    method: "POST",
-    headers: {
-      "X-API-Key": process.env.TINYFISH_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      url,
-      goal,
-      browser_profile: "stealth",
-      api_integration: "rosetta",
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("TinyFish agent timed out"), AGENT_TIMEOUT_MS);
 
-  if (!response.ok || !response.body) {
-    throw new Error(`TinyFish request failed with status ${response.status}`);
-  }
+  try {
+    const response = await fetch("https://agent.tinyfish.ai/v1/automation/run-sse", {
+      method: "POST",
+      headers: {
+        "X-API-Key": process.env.TINYFISH_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        goal,
+        browser_profile: "stealth",
+        api_integration: "rosetta",
+      }),
+      signal: controller.signal,
+    });
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let lastResult: TinyFishRawResult | null = null;
-  let terminalStatus: TinyFishStreamEvent["status"] | null = null;
-  let terminalError: string | null = null;
-
-  const parseMessage = (message: string) => {
-    const dataLine = message
-      .split("\n")
-      .map((line) => line.trimStart())
-      .find((line) => line.startsWith("data: "));
-
-    if (!dataLine) return;
-
-    try {
-      const event = JSON.parse(dataLine.slice(6)) as TinyFishStreamEvent;
-      if (event.type !== "COMPLETE") return;
-
-      terminalStatus = event.status ?? null;
-      if (typeof event.error === "string") {
-        terminalError = event.error;
-      } else if (event.error?.message) {
-        terminalError = event.error.message;
-      }
-
-      if (event.status === "COMPLETED" && event.result) {
-        lastResult = event.result;
-      }
-    } catch {
-      return;
+    if (!response.ok || !response.body) {
+      throw new Error(`TinyFish request failed with status ${response.status}`);
     }
-  };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let lastResult: TinyFishRawResult | null = null;
+    let terminalStatus: TinyFishStreamEvent["status"] | null = null;
+    let terminalError: string | null = null;
 
-    buffer += decoder.decode(value, { stream: true });
-    const messages = buffer.split("\n\n");
-    buffer = messages.pop() ?? "";
+    const parseMessage = (message: string) => {
+      const dataLine = message
+        .split("\n")
+        .map((line) => line.trimStart())
+        .find((line) => line.startsWith("data: "));
 
-    for (const message of messages) {
-      parseMessage(message);
+      if (!dataLine) return;
+
+      try {
+        const event = JSON.parse(dataLine.slice(6)) as TinyFishStreamEvent;
+        if (event.type !== "COMPLETE") return;
+
+        terminalStatus = event.status ?? null;
+        if (typeof event.error === "string") {
+          terminalError = event.error;
+        } else if (event.error?.message) {
+          terminalError = event.error.message;
+        }
+
+        if (event.status === "COMPLETED" && event.result) {
+          lastResult = event.result;
+        }
+      } catch {
+        return;
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const messages = buffer.split("\n\n");
+      buffer = messages.pop() ?? "";
+
+      for (const message of messages) {
+        parseMessage(message);
+      }
     }
-  }
 
-  if (buffer.trim()) {
-    parseMessage(buffer);
-  }
+    if (buffer.trim()) {
+      parseMessage(buffer);
+    }
 
-  if (terminalStatus && terminalStatus !== "COMPLETED") {
-    throw new Error(terminalError || `TinyFish run ended with status ${terminalStatus}`);
-  }
+    if (terminalStatus && terminalStatus !== "COMPLETED") {
+      throw new Error(terminalError || `TinyFish run ended with status ${terminalStatus}`);
+    }
 
-  if (!lastResult) {
-    throw new Error("TinyFish did not return a COMPLETE result");
-  }
+    if (!lastResult) {
+      throw new Error("TinyFish did not return a COMPLETE result");
+    }
 
-  return lastResult;
+    return lastResult;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Timed out after ${Math.round(AGENT_TIMEOUT_MS / 1000)}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function fallbackDetail(raw: TinyFishRawResult) {
