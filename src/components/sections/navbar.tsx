@@ -5,7 +5,7 @@ import { Sun, Moon, Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetTrigger, SheetClose, SheetContent } from "@/components/ui/sheet";
 
-const NAV_LINKS = ["How it works", "Pricing", "Blog"];
+const NAV_LINKS = [{ label: "How it works", href: "#how-it-works" }];
 
 export function Navbar() {
   const { theme, setTheme } = useTheme();
@@ -25,11 +25,11 @@ export function Navbar() {
         <nav className="hidden items-center gap-8 md:flex">
           {NAV_LINKS.map((item) => (
             <a
-              key={item}
-              href="#"
+              key={item.label}
+              href={item.href}
               className="text-sm text-muted-foreground transition-colors hover:text-foreground"
             >
-              {item}
+              {item.label}
             </a>
           ))}
         </nav>
@@ -44,8 +44,9 @@ export function Navbar() {
             <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
             <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           </button>
-          <Button variant="ghost" size="sm">Sign in</Button>
-          <Button size="sm">Try for free</Button>
+          <Button size="sm" asChild>
+            <a href="#trip-planner">Try for free</a>
+          </Button>
         </div>
 
         {/* Mobile: theme toggle + hamburger */}
@@ -89,20 +90,23 @@ export function Navbar() {
 
                 <nav className="mt-8 flex flex-col gap-1">
                   {NAV_LINKS.map((item) => (
-                    <SheetClose asChild key={item}>
+                    <SheetClose asChild key={item.label}>
                       <a
-                        href="#"
+                        href={item.href}
                         className="rounded-lg px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                       >
-                        {item}
+                        {item.label}
                       </a>
                     </SheetClose>
                   ))}
                 </nav>
 
                 <div className="mt-auto flex flex-col gap-2">
-                  <Button variant="outline" size="sm" className="w-full">Sign in</Button>
-                  <Button size="sm" className="w-full">Try for free</Button>
+                  <SheetClose asChild>
+                    <Button size="sm" className="w-full" asChild>
+                      <a href="#trip-planner">Try for free</a>
+                    </Button>
+                  </SheetClose>
                 </div>
               </div>
             </SheetContent>

@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300;1,9..40,400&display=swap');
 
 @custom-variant dark (&:is(.dark *));
 
@@ -28,8 +27,8 @@
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) * 1.5);
-  --font-serif: 'Sora', system-ui, sans-serif;
-  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-serif: var(--font-serif-family), system-ui, sans-serif;
+  --font-sans: var(--font-sans-family), system-ui, sans-serif;
 }
 
 /* ── LIGHT — #F7F4EF parchment, #E8490F orange, #1A1713 near-black ── */

@@ -1,6 +1,17 @@
 import type { Metadata } from "next";
+import { DM_Sans, Sora } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/ui/theme-provider";
+
+const dmSans = DM_Sans({
+  subsets: ["latin"],
+  variable: "--font-sans-family",
+});
+
+const sora = Sora({
+  subsets: ["latin"],
+  variable: "--font-serif-family",
+});
 
 export const metadata: Metadata = {
   title: "Rosetta — Decode the real price",
@@ -16,7 +27,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="antialiased">
+      <body className={`${dmSans.variable} ${sora.variable} antialiased`}>
         <ThemeProvider
           attribute="class"
           defaultTheme="light"
