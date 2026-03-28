@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import type { SearchRequestPayload } from "@/lib/search-schema";
 import { cn } from "@/lib/utils";
 
 type AgentStatus = "pending" | "scanning" | "done" | "error";
@@ -48,6 +49,7 @@ interface SearchResponse {
   searchedAt?: string;
   completedAgents?: number;
   failedAgents?: number;
+  error?: string;
 }
 
 interface SearchMetaEvent {
@@ -107,10 +109,7 @@ function formatDateLabel(value: string) {
   });
 }
 
-function buildQuerySummary(
-  query: string,
-  parsedQuery?: SearchMetaEvent["parsedQuery"]
-) {
+function buildQuerySummary(query: string, parsedQuery?: SearchMetaEvent["parsedQuery"]) {
   if (!parsedQuery) return query;
 
   const parts: string[] = [];
@@ -129,13 +128,8 @@ function buildQuerySummary(
     parts.push(formatDateLabel(parsedQuery.departDate));
   }
 
-  if (parsedQuery.pax) {
-    parts.push(`${parsedQuery.pax} pax`);
-  }
-
-  if (parts.length === 0 && parsedQuery.normalizedQuery) {
-    return parsedQuery.normalizedQuery;
-  }
+  if (parsedQuery.pax) parts.push(`${parsedQuery.pax} pax`);
+  if (parts.length === 0 && parsedQuery.normalizedQuery) return parsedQuery.normalizedQuery;
 
   return parts.join(" · ") || query;
 }
@@ -148,22 +142,10 @@ function buildPriceExplanation(result: Result, bestTotal: number, pax: number) {
   const premiumVsBest = result.total - bestTotal;
   const headlineTotal = result.headline * pax;
 
-  if (premiumVsBest <= 0) {
-    return "Matches the best total once checkout fees are included.";
-  }
-
-  if (hiddenFee > 0 && baggage > 0) {
-    return `Looks cheaper upfront, but baggage and checkout fees add S$${hiddenFee + baggage}.`;
-  }
-
-  if (hiddenFee > 0) {
-    return `Looks cheaper upfront, but checkout fees add S$${hiddenFee}.`;
-  }
-
-  if (baggage > 0) {
-    return `Base fare looks low, but baggage adds S$${baggage} before checkout.`;
-  }
-
+  if (premiumVsBest <= 0) return "Matches the best total once checkout fees are included.";
+  if (hiddenFee > 0 && baggage > 0) return `Looks cheaper upfront, but baggage and checkout fees add S$${hiddenFee + baggage}.`;
+  if (hiddenFee > 0) return `Looks cheaper upfront, but checkout fees add S$${hiddenFee}.`;
+  if (baggage > 0) return `Base fare looks low, but baggage adds S$${baggage} before checkout.`;
   if (headlineTotal < result.total) {
     return `Advertised at S$${headlineTotal}, but taxes push the true total up by S$${result.total - headlineTotal}.`;
   }
@@ -219,10 +201,8 @@ function parseSseBlock(block: string) {
 
   if (dataLines.length === 0) return null;
 
-  const rawData = dataLines.join("\n");
-
   try {
-    const parsed = JSON.parse(rawData) as StreamEventPayload;
+    const parsed = JSON.parse(dataLines.join("\n")) as StreamEventPayload;
     return {
       type: parsed.type ?? parsed.event ?? eventName,
       payload: parsed,
@@ -250,12 +230,8 @@ function applyStreamEvent(
     return;
   }
 
-  const platform = "platform" in payload && typeof payload.platform === "string"
-    ? payload.platform
-    : "";
-  const agentError = "error" in payload && typeof payload.error === "string"
-    ? payload.error
-    : undefined;
+  const platform = "platform" in payload && typeof payload.platform === "string" ? payload.platform : "";
+  const agentError = "error" in payload && typeof payload.error === "string" ? payload.error : undefined;
   const agentResult = "result" in payload ? payload.result : undefined;
 
   if (type === "AGENT_START" && platform) {
@@ -264,17 +240,9 @@ function applyStreamEvent(
   }
 
   if (type === "AGENT_DONE" && platform) {
-    setAgents((current) =>
-      upsertAgent(current, platform, agentError ? "error" : "done")
-    );
-
-    if (agentResult) {
-      setResults((current) => upsertResult(current, agentResult as Result));
-    }
-
-    if (agentError) {
-      setError((current) => current ?? agentError ?? "Search failed.");
-    }
+    setAgents((current) => upsertAgent(current, platform, agentError ? "error" : "done"));
+    if (agentResult) setResults((current) => upsertResult(current, agentResult as Result));
+    if (agentError) setError((current) => current ?? agentError ?? "Search failed.");
     return;
   }
 
@@ -309,9 +277,7 @@ function AgentChip({ agent }: { agent: Agent }) {
     >
       {agent.status === "done" && <CheckCircle2 className="h-3 w-3 shrink-0" />}
       {agent.status === "scanning" && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
-      {agent.status === "pending" && (
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-30" />
-      )}
+      {agent.status === "pending" && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-30" />}
       {agent.status === "error" && <AlertTriangle className="h-3 w-3 shrink-0" />}
       {agent.name}
     </div>
@@ -406,9 +372,7 @@ function ResultCard({
                   </Badge>
                 )}
               </div>
-              <div className="truncate text-sm text-muted-foreground sm:text-base">
-                {result.route}
-              </div>
+              <div className="truncate text-sm text-muted-foreground sm:text-base">{result.route}</div>
               <div className="truncate text-xs text-muted-foreground/70">{result.detail}</div>
             </div>
           </div>
@@ -476,8 +440,7 @@ function ResultCard({
 
         {explanation ? (
           <div className="rounded-xl border border-border/70 bg-background/60 px-4 py-3 text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">Why this costs more:</span>{" "}
-            {explanation}
+            <span className="font-medium text-foreground">Why this costs more:</span> {explanation}
           </div>
         ) : null}
 
@@ -492,11 +455,7 @@ function ResultCard({
               {premiumVsBest > 0 ? `S$${premiumVsBest} more than the best deal` : "Best total price"}
             </div>
           )}
-          <Button
-            variant={result.isBest ? "default" : "outline"}
-            size="sm"
-            className="gap-1.5 self-start sm:self-auto"
-          >
+          <Button variant={result.isBest ? "default" : "outline"} size="sm" className="gap-1.5 self-start sm:self-auto">
             Book now
             <ExternalLink className="h-3.5 w-3.5" />
           </Button>
@@ -506,7 +465,8 @@ function ResultCard({
   );
 }
 
-export function Results({ query }: { query: string }) {
+export function Results({ search }: { search: SearchRequestPayload }) {
+  const query = search.query;
   const [agents, setAgents] = useState<Agent[]>([]);
   const [results, setResults] = useState<Result[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -535,12 +495,19 @@ export function Results({ query }: { query: string }) {
         const response = await fetch("/api/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify(search),
           signal: controller.signal,
         });
 
         if (!response.ok) {
-          throw new Error(`Search failed with status ${response.status}`);
+          let message = `Search failed with status ${response.status}`;
+          try {
+            const payload = (await response.json()) as { error?: string };
+            if (payload.error) message = payload.error;
+          } catch {
+            // keep fallback status message
+          }
+          throw new Error(message);
         }
 
         const contentType = response.headers.get("content-type") ?? "";
@@ -607,55 +574,47 @@ export function Results({ query }: { query: string }) {
         }
       } catch (err) {
         if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "Unable to fetch results.");
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message || "Unable to fetch results.");
       } finally {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
+        if (!controller.signal.aborted) setIsLoading(false);
       }
     }
 
     void runSearch();
     return () => controller.abort();
-  }, [query]);
+  }, [query, search]);
 
-  const doneCount = agents.filter((agent) => agent.status === "done").length;
-  const allDone = agents.length > 0 && agents.every((agent) => agent.status === "done" || agent.status === "error") && !isLoading;
+  const doneCount = agents.filter((agent) => agent.status === "done" || agent.status === "error").length;
+  const allDone =
+    hasCompleted || (agents.length > 0 && agents.every((agent) => agent.status === "done" || agent.status === "error") && !isLoading);
   const bestTotal = results[0]?.total ?? 0;
-  const worstTotal = results[results.length - 1]?.total ?? bestTotal;
   const cheapestHeadlineResult = useMemo(
-    () =>
-      results.length === 0
-        ? null
-        : [...results].sort((a, b) => a.headline - b.headline)[0],
+    () => (results.length === 0 ? null : [...results].sort((a, b) => a.headline - b.headline)[0]),
     [results]
   );
-  const insightDelta =
-    cheapestHeadlineResult && bestTotal
-      ? cheapestHeadlineResult.total - bestTotal
-      : 0;
+  const insightDelta = cheapestHeadlineResult && bestTotal ? cheapestHeadlineResult.total - bestTotal : 0;
   const skeletonCount = Math.max(INITIAL_SKELETON_COUNT - results.length, 0);
   const totalAgents = agents.length;
   const errorAgents = agents.filter((agent) => agent.status === "error").length;
   const completedAgents = responseMeta?.completedAgents ?? doneCount;
   const failedAgents = responseMeta?.failedAgents ?? errorAgents;
-  const displayedResults = useMemo(() => {
-    const filtered = showWarningsOnly
-      ? results.filter((result) => (result.flags?.length ?? 0) > 0)
-      : results;
 
+  const displayedResults = useMemo(() => {
+    const filtered = showWarningsOnly ? results.filter((result) => (result.flags?.length ?? 0) > 0) : results;
     const sorted = [...filtered];
 
     if (sortMode === "headline") {
       sorted.sort((a, b) => a.headline - b.headline);
     } else if (sortMode === "largest-gap") {
-      sorted.sort((a, b) => (b.total - b.headline * 2) - (a.total - a.headline * 2));
+      sorted.sort((a, b) => b.total - b.headline * 2 - (a.total - a.headline * 2));
     } else {
       sorted.sort((a, b) => a.total - b.total);
     }
 
     return normalizeResults(sorted);
   }, [results, showWarningsOnly, sortMode]);
+
   const displayedBestTotal = displayedResults[0]?.total ?? 0;
   const displayedWorstTotal = displayedResults[displayedResults.length - 1]?.total ?? displayedBestTotal;
   const warningResultCount = results.filter((result) => (result.flags?.length ?? 0) > 0).length;
@@ -664,16 +623,12 @@ export function Results({ query }: { query: string }) {
     <section className="mx-auto max-w-4xl px-6 pb-24 pt-10">
       <div className="mb-6 flex flex-wrap items-center gap-3 text-sm">
         <span className="text-muted-foreground">Results for</span>
-        <span className="rounded-full bg-secondary px-3 py-1 font-medium text-foreground">
-          {query}
-        </span>
+        <span className="rounded-full bg-secondary px-3 py-1 font-medium text-foreground">{query}</span>
       </div>
 
       {querySummary ? (
         <div className="mb-6 flex flex-wrap items-center gap-2">
-          <span className="text-xs uppercase tracking-[0.24em] text-muted-foreground/70">
-            Interpreted trip
-          </span>
+          <span className="text-xs uppercase tracking-[0.24em] text-muted-foreground/70">Interpreted trip</span>
           <span className="rounded-full border border-border bg-background px-4 py-1.5 text-sm font-medium text-foreground">
             {querySummary}
           </span>
@@ -691,18 +646,12 @@ export function Results({ query }: { query: string }) {
             ) : (
               <>
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                {agents.length > 0
-                  ? `Searching ${agents.length} sites · ${doneCount} complete`
-                  : "Starting live search agents"}
+                {agents.length > 0 ? `Searching ${agents.length} sites · ${doneCount} complete` : "Starting live search agents"}
               </>
             )}
           </div>
           <span className="text-xs tabular-nums text-muted-foreground">
-            {agents.length > 0
-              ? `${doneCount} / ${agents.length}`
-              : isLoading
-                ? "…"
-                : "0 / 0"}
+            {agents.length > 0 ? `${doneCount} / ${agents.length}` : isLoading ? "…" : "0 / 0"}
           </span>
         </div>
 
@@ -710,12 +659,7 @@ export function Results({ query }: { query: string }) {
           <div
             className="h-full rounded-full bg-primary transition-all duration-700"
             style={{
-              width:
-                agents.length > 0
-                  ? `${(doneCount / agents.length) * 100}%`
-                  : isLoading
-                    ? "12%"
-                    : "0%",
+              width: agents.length > 0 ? `${(doneCount / agents.length) * 100}%` : isLoading ? "12%" : "0%",
             }}
           />
         </div>
@@ -727,9 +671,7 @@ export function Results({ query }: { query: string }) {
             ))}
           </div>
         ) : (
-          <div className="text-sm text-muted-foreground">
-            Waiting for the first platform to report back.
-          </div>
+          <div className="text-sm text-muted-foreground">Waiting for the first platform to report back.</div>
         )}
       </div>
 
@@ -737,28 +679,22 @@ export function Results({ query }: { query: string }) {
         <div className="mb-4 rounded-2xl border border-border bg-secondary/20 p-4 text-sm text-muted-foreground">
           {failedAgents > 0 && completedAgents === 0 ? (
             <>
-              <span className="font-medium text-foreground">No live results.</span>{" "}
-              All selected platforms timed out, were blocked, or failed before checkout.
+              <span className="font-medium text-foreground">No live results.</span> All selected platforms timed out, were blocked, or failed before checkout.
             </>
           ) : failedAgents > 0 ? (
             <>
-              <span className="font-medium text-foreground">Partial live coverage.</span>{" "}
-              {completedAgents} platform{completedAgents === 1 ? "" : "s"} returned usable checkout data and{" "}
-              {failedAgents} platform{failedAgents === 1 ? "" : "s"} timed out or were blocked.
+              <span className="font-medium text-foreground">Partial live coverage.</span> {completedAgents} platform{completedAgents === 1 ? "" : "s"} returned usable checkout data and {failedAgents} platform{failedAgents === 1 ? "" : "s"} timed out or were blocked.
             </>
           ) : totalAgents > 0 ? (
             <>
-              <span className="font-medium text-foreground">Live results verified.</span>{" "}
-              All {totalAgents} selected platforms completed successfully.
+              <span className="font-medium text-foreground">Live results verified.</span> All {totalAgents} selected platforms completed successfully.
             </>
           ) : null}
         </div>
       ) : null}
 
       {error ? (
-        <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">
-          {error}
-        </div>
+        <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">{error}</div>
       ) : null}
 
       {(isLoading || hasCompleted || results.length > 0) && (
@@ -770,9 +706,7 @@ export function Results({ query }: { query: string }) {
 
           <div className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs uppercase tracking-[0.2em] text-muted-foreground/70">
-                Sort by
-              </span>
+              <span className="text-xs uppercase tracking-[0.2em] text-muted-foreground/70">Sort by</span>
               {([
                 { value: "true-total", label: "True total" },
                 { value: "headline", label: "Advertised price" },
@@ -784,9 +718,7 @@ export function Results({ query }: { query: string }) {
                   onClick={() => setSortMode(option.value)}
                   className={cn(
                     "rounded-full px-3 py-1.5 text-sm transition-colors",
-                    sortMode === option.value
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-secondary text-muted-foreground hover:text-foreground"
+                    sortMode === option.value ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground"
                   )}
                 >
                   {option.label}
@@ -799,14 +731,10 @@ export function Results({ query }: { query: string }) {
               onClick={() => setShowWarningsOnly((current) => !current)}
               className={cn(
                 "inline-flex items-center rounded-full px-3 py-1.5 text-sm transition-colors",
-                showWarningsOnly
-                  ? "bg-warning/15 text-warning-foreground ring-1 ring-warning/30"
-                  : "bg-secondary text-muted-foreground hover:text-foreground"
+                showWarningsOnly ? "bg-warning/15 text-warning-foreground ring-1 ring-warning/30" : "bg-secondary text-muted-foreground hover:text-foreground"
               )}
             >
-              {showWarningsOnly
-                ? `Showing warnings only (${warningResultCount})`
-                : `Show warnings only (${warningResultCount})`}
+              {showWarningsOnly ? `Showing warnings only (${warningResultCount})` : `Show warnings only (${warningResultCount})`}
             </button>
           </div>
 
@@ -831,18 +759,14 @@ export function Results({ query }: { query: string }) {
 
           {!isLoading && displayedResults.length === 0 ? (
             <div className="rounded-xl border border-border bg-secondary/20 p-4 text-sm text-muted-foreground">
-              {showWarningsOnly
-                ? "No results with warning flags matched the current filter."
-                : "No results came back for this query."}
+              {showWarningsOnly ? "No results with warning flags matched the current filter." : "No results came back for this query."}
             </div>
           ) : null}
 
           {!isLoading && cheapestHeadlineResult && insightDelta > 0 ? (
             <div className="mt-2 rounded-xl border border-border bg-secondary/30 p-4 text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">The cheapest-looking option</span>{" "}
-              ({cheapestHeadlineResult.platform} at S${cheapestHeadlineResult.headline * 2}) costs{" "}
-              <span className="font-medium text-destructive">S${insightDelta} more</span> at
-              checkout than the best deal.
+              <span className="font-medium text-foreground">The cheapest-looking option</span> ({cheapestHeadlineResult.platform} at S${cheapestHeadlineResult.headline * 2}) costs{" "}
+              <span className="font-medium text-destructive">S${insightDelta} more</span> at checkout than the best deal.
             </div>
           ) : null}
         </div>
