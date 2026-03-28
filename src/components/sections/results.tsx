@@ -1,137 +1,305 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { CheckCircle2, Loader2, AlertTriangle, TrendingDown, ExternalLink } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ExternalLink,
+  Loader2,
+  TrendingDown,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-type AgentStatus = "pending" | "scanning" | "done";
-interface Agent { name: string; status: AgentStatus; }
+type AgentStatus = "pending" | "scanning" | "done" | "error";
+
+interface Agent {
+  name: string;
+  status: AgentStatus;
+}
+
 interface PriceBreakdown {
-  base: number; taxes: number; baggage?: number;
-  platformFee?: number; serviceFee?: number;
+  base: number;
+  taxes: number;
+  baggage?: number;
+  platformFee?: number;
+  serviceFee?: number;
 }
+
 interface Result {
-  platform: string; platformColor: string; platformInitials: string;
-  route: string; detail: string; headline: number;
-  breakdown: PriceBreakdown; total: number;
-  isBest?: boolean; flags?: string[];
+  platform: string;
+  platformColor: string;
+  platformInitials: string;
+  route: string;
+  detail: string;
+  headline: number;
+  breakdown: PriceBreakdown;
+  total: number;
+  isBest?: boolean;
+  flags?: string[];
 }
 
-const MOCK_AGENTS: Agent[] = [
-  { name: "Skyscanner",         status: "done" },
-  { name: "Google Flights",     status: "done" },
-  { name: "Kayak",              status: "done" },
-  { name: "Expedia",            status: "done" },
-  { name: "Booking.com",        status: "done" },
-  { name: "Agoda",              status: "scanning" },
-  { name: "Singapore Airlines", status: "scanning" },
-  { name: "AirAsia",            status: "pending" },
-];
+interface SearchResponse {
+  results: Result[];
+  query?: string;
+  searchedAt?: string;
+}
 
-const MOCK_RESULTS: Result[] = [
-  {
-    platform: "Skyscanner",
-    platformColor: "#0770CD",
-    platformInitials: "SK",
-    route: "SIN → BKK · Non-stop · 2h 15m",
-    detail: "Scoot TR608 · Apr 18 → Apr 23",
-    headline: 89,
-    breakdown: { base: 89, taxes: 34, baggage: 42, platformFee: 0 },
-    total: 254,
-    isBest: true,
-  },
-  {
-    platform: "Google Flights",
-    platformColor: "#4285F4",
-    platformInitials: "GF",
-    route: "SIN → BKK · Non-stop · 2h 20m",
-    detail: "AirAsia FD308 · Apr 18 → Apr 23",
-    headline: 79,
-    breakdown: { base: 79, taxes: 38, baggage: 60, platformFee: 18 },
-    total: 274,
-    flags: ["Hidden platform fee detected — S$18"],
-  },
-  {
-    platform: "Expedia",
-    platformColor: "#FFB700",
-    platformInitials: "EX",
-    route: "SIN → BKK · Non-stop · 2h 15m",
-    detail: "Scoot TR608 · Apr 18 → Apr 23",
-    headline: 95,
-    breakdown: { base: 95, taxes: 34, baggage: 42, serviceFee: 24 },
-    total: 290,
-    flags: ['"50% off" — original price set 2 days ago'],
-  },
-];
+interface StreamEventPayload {
+  type?: string;
+  event?: string;
+  agent?: string;
+  platform?: string;
+  result?: Result;
+  results?: Result[];
+  data?: unknown;
+  message?: string;
+}
+
+const INITIAL_SKELETON_COUNT = 3;
+
+function normalizeResults(results: Result[]): Result[] {
+  const sorted = [...results].sort((a, b) => a.total - b.total);
+  let bestAssigned = false;
+
+  return sorted.map((result, index) => {
+    const isBest = result.isBest || (!bestAssigned && index === 0);
+    if (isBest) bestAssigned = true;
+
+    return {
+      ...result,
+      isBest,
+      flags: result.flags ?? [],
+      breakdown: {
+        base: result.breakdown?.base ?? 0,
+        taxes: result.breakdown?.taxes ?? 0,
+        baggage: result.breakdown?.baggage,
+        platformFee: result.breakdown?.platformFee,
+        serviceFee: result.breakdown?.serviceFee,
+      },
+    };
+  });
+}
+
+function upsertAgent(list: Agent[], name: string, status: AgentStatus) {
+  const trimmed = name.trim();
+  if (!trimmed) return list;
+
+  const index = list.findIndex((agent) => agent.name === trimmed);
+  if (index === -1) return [...list, { name: trimmed, status }];
+
+  const next = [...list];
+  next[index] = { ...next[index], status };
+  return next;
+}
+
+function upsertResult(list: Result[], nextResult: Result) {
+  const nextKey = nextResult.platform;
+  const filtered = list.filter((item) => item.platform !== nextKey);
+  return normalizeResults([...filtered, nextResult]);
+}
+
+function parseSseBlock(block: string) {
+  const lines = block.split("\n");
+  let eventName = "";
+  const dataLines: string[] = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (!line) continue;
+    if (line.startsWith("event:")) eventName = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+  }
+
+  if (dataLines.length === 0) return null;
+
+  const rawData = dataLines.join("\n");
+  try {
+    const parsed = JSON.parse(rawData) as StreamEventPayload;
+    return {
+      type: parsed.type ?? parsed.event ?? eventName,
+      payload: parsed,
+    };
+  } catch {
+    return {
+      type: eventName || "message",
+      payload: { data: rawData } satisfies StreamEventPayload,
+    };
+  }
+}
+
+function applyStreamEvent(
+  payload: StreamEventPayload,
+  setAgents: React.Dispatch<React.SetStateAction<Agent[]>>,
+  setResults: React.Dispatch<React.SetStateAction<Result[]>>,
+  setError: React.Dispatch<React.SetStateAction<string | null>>
+) {
+  const type = (payload.type ?? payload.event ?? "").toUpperCase();
+  const agentName =
+    typeof payload.agent === "string"
+      ? payload.agent
+      : typeof payload.platform === "string"
+        ? payload.platform
+        : "";
+
+  if (type === "AGENT_START") {
+    setAgents((current) => upsertAgent(current, agentName, "scanning"));
+    return;
+  }
+
+  if (type === "AGENT_DONE") {
+    setAgents((current) => upsertAgent(current, agentName, "done"));
+    if (payload.result) setResults((current) => upsertResult(current, payload.result!));
+    return;
+  }
+
+  if (type === "AGENT_ERROR") {
+    setAgents((current) => upsertAgent(current, agentName, "error"));
+    return;
+  }
+
+  if (type === "RESULT" && payload.result) {
+    setResults((current) => upsertResult(current, payload.result!));
+    return;
+  }
+
+  if (type === "RESULTS" && Array.isArray(payload.results)) {
+    setResults(normalizeResults(payload.results));
+    setAgents(
+      payload.results.map((result) => ({
+        name: result.platform,
+        status: "done" as AgentStatus,
+      }))
+    );
+    return;
+  }
+
+  if (type === "ERROR") {
+    setError(payload.message ?? "Search failed.");
+  }
+}
 
 function AgentChip({ agent }: { agent: Agent }) {
   return (
-    <div className={cn(
-      "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs transition-all",
-      agent.status === "done"     && "bg-success/10 text-success",
-      agent.status === "scanning" && "bg-primary/10 text-primary",
-      agent.status === "pending"  && "bg-secondary text-muted-foreground"
-    )}>
-      {agent.status === "done"     && <CheckCircle2 className="h-3 w-3 shrink-0" />}
+    <div
+      className={cn(
+        "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs transition-all",
+        agent.status === "done" && "bg-success/10 text-success",
+        agent.status === "scanning" && "bg-primary/10 text-primary",
+        agent.status === "pending" && "bg-secondary text-muted-foreground",
+        agent.status === "error" && "bg-destructive/10 text-destructive"
+      )}
+    >
+      {agent.status === "done" && <CheckCircle2 className="h-3 w-3 shrink-0" />}
       {agent.status === "scanning" && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
-      {agent.status === "pending"  && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-30" />}
+      {agent.status === "pending" && (
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-30" />
+      )}
+      {agent.status === "error" && <AlertTriangle className="h-3 w-3 shrink-0" />}
       {agent.name}
     </div>
   );
 }
 
-function ResultCard({ result, rank, pax = 2 }: { result: Result; rank: number; pax?: number }) {
+function ResultSkeleton() {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <div className="animate-pulse space-y-5">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-11 w-11 rounded-xl bg-secondary" />
+            <div className="space-y-2">
+              <div className="h-4 w-36 rounded-full bg-secondary" />
+              <div className="h-3 w-44 rounded-full bg-secondary/80" />
+              <div className="h-3 w-28 rounded-full bg-secondary/70" />
+            </div>
+          </div>
+          <div className="space-y-2 sm:text-right">
+            <div className="h-3 w-20 rounded-full bg-secondary" />
+            <div className="h-10 w-28 rounded-full bg-secondary" />
+            <div className="h-3 w-24 rounded-full bg-secondary/80" />
+          </div>
+        </div>
+
+        <div className="rounded-xl bg-secondary/40 px-4 py-3">
+          <div className="flex flex-wrap gap-3">
+            <div className="h-4 w-28 rounded-full bg-secondary" />
+            <div className="h-4 w-32 rounded-full bg-secondary" />
+            <div className="h-4 w-24 rounded-full bg-secondary" />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="h-4 w-40 rounded-full bg-secondary" />
+          <div className="h-8 w-24 rounded-xl bg-secondary" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResultCard({
+  result,
+  rank,
+  pax = 2,
+  bestTotal,
+  worstTotal,
+}: {
+  result: Result;
+  rank: number;
+  pax?: number;
+  bestTotal: number;
+  worstTotal: number;
+}) {
   const { base, taxes, baggage, platformFee, serviceFee } = result.breakdown;
   const hiddenFee = (platformFee ?? 0) + (serviceFee ?? 0);
-  const worstTotal = MOCK_RESULTS[MOCK_RESULTS.length - 1].total;
   const savings = worstTotal - result.total;
+  const premiumVsBest = result.total - bestTotal;
 
   return (
-    <div className={cn(
-      "group relative overflow-hidden rounded-2xl bg-card transition-all duration-200 hover:shadow-lg",
-      result.isBest
-        ? "ring-2 ring-primary shadow-md"
-        : "ring-1 ring-border shadow-sm"
-    )}>
-      {/* Best deal bar */}
-      {result.isBest && (
-        <div className="absolute left-0 top-0 h-full w-1 bg-primary" />
+    <motion.div
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ delay: rank * 0.12 }}
+      className={cn(
+        "group relative overflow-hidden rounded-2xl bg-card transition-all duration-200 hover:shadow-lg",
+        result.isBest ? "ring-2 ring-primary shadow-md" : "ring-1 ring-border shadow-sm"
       )}
+    >
+      {result.isBest && <div className="absolute left-0 top-0 h-full w-1 bg-primary" />}
 
       <div className={cn("flex flex-col gap-5 p-6", result.isBest && "pl-7")}>
-        {/* Header row */}
-        <div className="flex items-start justify-between gap-4">
-          {/* Platform + route */}
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
             <div
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-sm font-bold text-white"
               style={{ background: result.platformColor }}
             >
               {result.platformInitials}
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold text-foreground">{result.platform}</span>
                 {result.isBest && (
-                  <Badge variant="default" className="text-[10px] py-0 px-2">
+                  <Badge variant="default" className="px-2 py-0 text-[10px]">
                     Best deal
                   </Badge>
                 )}
               </div>
-              <div className="text-sm text-muted-foreground">{result.route}</div>
-              <div className="text-xs text-muted-foreground/70">{result.detail}</div>
+              <div className="truncate text-sm text-muted-foreground sm:text-base">
+                {result.route}
+              </div>
+              <div className="truncate text-xs text-muted-foreground/70">{result.detail}</div>
             </div>
           </div>
 
-          {/* Price — the star of the show */}
-          <div className="shrink-0 text-right">
-            {/* Advertised "from" price — struck through, visually dead */}
+          <div className="text-left sm:text-right">
             <div className="mb-0.5 text-sm text-muted-foreground line-through decoration-muted-foreground/60">
               from S${result.headline * pax}
             </div>
-            {/* Real price — large, bold, unavoidable */}
             <div className="font-serif text-4xl font-normal leading-none tracking-tight text-foreground">
               S${result.total}
             </div>
@@ -141,7 +309,6 @@ function ResultCard({ result, rank, pax = 2 }: { result: Result; rank: number; p
           </div>
         </div>
 
-        {/* Fee breakdown — the receipt */}
         <div className="rounded-xl bg-secondary/40 px-4 py-3">
           <div className="flex flex-wrap gap-x-6 gap-y-2">
             <div className="flex items-center gap-2 text-sm">
@@ -179,7 +346,6 @@ function ResultCard({ result, rank, pax = 2 }: { result: Result; rank: number; p
           </div>
         </div>
 
-        {/* Warning flags */}
         {result.flags && result.flags.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {result.flags.map((flag) => (
@@ -191,8 +357,7 @@ function ResultCard({ result, rank, pax = 2 }: { result: Result; rank: number; p
           </div>
         )}
 
-        {/* Footer row */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           {result.isBest && savings > 0 ? (
             <div className="flex items-center gap-1.5 text-sm font-medium text-success">
               <TrendingDown className="h-4 w-4" />
@@ -200,106 +365,226 @@ function ResultCard({ result, rank, pax = 2 }: { result: Result; rank: number; p
             </div>
           ) : (
             <div className="text-xs text-muted-foreground">
-              S${result.total - MOCK_RESULTS[0].total} more than the best deal
+              {premiumVsBest > 0 ? `S$${premiumVsBest} more than the best deal` : "Best total price"}
             </div>
           )}
-          <Button
-            variant={result.isBest ? "default" : "outline"}
-            size="sm"
-            className="gap-1.5"
-          >
+          <Button variant={result.isBest ? "default" : "outline"} size="sm" className="gap-1.5 self-start sm:self-auto">
             Book now
             <ExternalLink className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }
 
 export function Results({ query }: { query: string }) {
-  const [agents, setAgents] = useState<Agent[]>(MOCK_AGENTS);
-  const [showResults, setShowResults] = useState(false);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [results, setResults] = useState<Result[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasCompleted, setHasCompleted] = useState(false);
 
   useEffect(() => {
-    const t1 = setTimeout(() => {
-      setAgents((p) => p.map((a) => a.name === "Agoda" ? { ...a, status: "done" as AgentStatus } : a));
-    }, 1800);
-    const t2 = setTimeout(() => {
-      setAgents((p) => p.map((a) => a.status === "scanning" ? { ...a, status: "done" as AgentStatus } : a));
-      setShowResults(true);
-    }, 3200);
-    const t3 = setTimeout(() => {
-      setAgents((p) => p.map((a) => a.name === "AirAsia" ? { ...a, status: "done" as AgentStatus } : a));
-    }, 4000);
-    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+    const controller = new AbortController();
+
+    async function runSearch() {
+      setAgents([]);
+      setResults([]);
+      setError(null);
+      setIsLoading(true);
+      setHasCompleted(false);
+
+      try {
+        const response = await fetch("/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`Search failed with status ${response.status}`);
+        }
+
+        const contentType = response.headers.get("content-type") ?? "";
+
+        if (contentType.includes("application/json")) {
+          const payload = (await response.json()) as SearchResponse;
+          const normalized = normalizeResults(payload.results ?? []);
+          setResults(normalized);
+          setAgents(
+            normalized.map((result) => ({
+              name: result.platform,
+              status: "done" as AgentStatus,
+            }))
+          );
+          return;
+        }
+
+        if (!response.body) {
+          throw new Error("Search stream is unavailable.");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const blocks = buffer.split("\n\n");
+          buffer = blocks.pop() ?? "";
+
+          for (const block of blocks) {
+            const parsed = parseSseBlock(block);
+            if (!parsed) continue;
+            applyStreamEvent(parsed.payload, setAgents, setResults, setError);
+          }
+        }
+
+        if (buffer.trim()) {
+          const parsed = parseSseBlock(buffer);
+          if (parsed) applyStreamEvent(parsed.payload, setAgents, setResults, setError);
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setError(err instanceof Error ? err.message : "Unable to fetch results.");
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+          setHasCompleted(true);
+        }
+      }
+    }
+
+    void runSearch();
+    return () => controller.abort();
   }, [query]);
 
-  const doneCount = agents.filter((a) => a.status === "done").length;
-  const allDone = doneCount === agents.length;
+  const doneCount = agents.filter((agent) => agent.status === "done").length;
+  const allDone = agents.length > 0 && doneCount === agents.length && !isLoading;
+  const bestTotal = results[0]?.total ?? 0;
+  const worstTotal = results[results.length - 1]?.total ?? bestTotal;
+  const cheapestHeadlineResult = useMemo(
+    () =>
+      results.length === 0
+        ? null
+        : [...results].sort((a, b) => a.headline - b.headline)[0],
+    [results]
+  );
+  const insightDelta =
+    cheapestHeadlineResult && bestTotal
+      ? cheapestHeadlineResult.total - bestTotal
+      : 0;
+  const skeletonCount = Math.max(INITIAL_SKELETON_COUNT - results.length, 0);
 
   return (
     <section className="mx-auto max-w-4xl px-6 pb-24 pt-10">
-      {/* Query echo */}
-      <div className="mb-6 flex items-center gap-3 text-sm">
+      <div className="mb-6 flex flex-wrap items-center gap-3 text-sm">
         <span className="text-muted-foreground">Results for</span>
         <span className="rounded-full bg-secondary px-3 py-1 font-medium text-foreground">
           {query}
         </span>
       </div>
 
-      {/* Agent status panel */}
       <div className="mb-8 rounded-2xl border border-border bg-card p-5 shadow-sm">
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-4 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2 text-sm font-medium text-foreground">
             {allDone ? (
-              <><CheckCircle2 className="h-4 w-4 text-success" />
-              All {agents.length} sites searched</>
+              <>
+                <CheckCircle2 className="h-4 w-4 text-success" />
+                All {agents.length} sites searched
+              </>
             ) : (
-              <><Loader2 className="h-4 w-4 animate-spin text-primary" />
-              Searching {agents.length} sites — {doneCount} complete</>
+              <>
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                {agents.length > 0
+                  ? `Searching ${agents.length} sites · ${doneCount} complete`
+                  : "Starting live search agents"}
+              </>
             )}
           </div>
           <span className="text-xs tabular-nums text-muted-foreground">
-            {doneCount} / {agents.length}
+            {agents.length > 0 ? `${doneCount} / ${agents.length}` : isLoading ? "…" : "0 / 0"}
           </span>
         </div>
-        {/* Progress bar */}
+
         <div className="mb-4 h-1 w-full overflow-hidden rounded-full bg-secondary">
           <div
             className="h-full rounded-full bg-primary transition-all duration-700"
-            style={{ width: `${(doneCount / agents.length) * 100}%` }}
+            style={{
+              width: agents.length > 0 ? `${(doneCount / agents.length) * 100}%` : isLoading ? "12%" : "0%",
+            }}
           />
         </div>
-        <div className="flex flex-wrap gap-2">
-          {agents.map((agent) => <AgentChip key={agent.name} agent={agent} />)}
-        </div>
+
+        {agents.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {agents.map((agent) => (
+              <AgentChip key={agent.name} agent={agent} />
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-muted-foreground">
+            Waiting for the first platform to report back.
+          </div>
+        )}
       </div>
 
-      {/* Results */}
-      {showResults && (
+      {error ? (
+        <div className="rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">
+          {error}
+        </div>
+      ) : null}
+
+      {(isLoading || hasCompleted || results.length > 0) && (
         <div className="space-y-4">
-          {/* Results header */}
-          <div className="flex items-baseline justify-between pb-1">
+          <div className="flex flex-col gap-2 pb-1 sm:flex-row sm:items-baseline sm:justify-between">
             <h2 className="font-serif text-xl text-foreground">
-              Singapore → Bangkok · Apr 18–23 · 2 pax
+              Live search results
             </h2>
             <span className="text-sm text-muted-foreground">
               Ranked by true price
             </span>
           </div>
 
-          {MOCK_RESULTS.map((result, i) => (
-            <ResultCard key={result.platform} result={result} rank={i + 1} pax={2} />
-          ))}
+          <AnimatePresence initial={false}>
+            {results.map((result, index) => (
+              <ResultCard
+                key={result.platform}
+                result={result}
+                rank={index}
+                pax={2}
+                bestTotal={bestTotal}
+                worstTotal={worstTotal}
+              />
+            ))}
+          </AnimatePresence>
 
-          {/* Insight callout */}
-          <div className="mt-2 rounded-xl border border-border bg-secondary/30 p-4 text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">The cheapest-looking option</span>
-            {" "}(Google Flights at S$79) costs{" "}
-            <span className="font-medium text-destructive">S$20 more</span>
-            {" "}at checkout than the best deal. Hidden platform fees add S$18 on top.
-          </div>
+          {isLoading &&
+            Array.from({ length: skeletonCount }).map((_, index) => (
+              <ResultSkeleton key={`skeleton-${index}`} />
+            ))}
+
+          {!isLoading && results.length === 0 ? (
+            <div className="rounded-xl border border-border bg-secondary/20 p-4 text-sm text-muted-foreground">
+              No results came back for this query.
+            </div>
+          ) : null}
+
+          {!isLoading && cheapestHeadlineResult && insightDelta > 0 ? (
+            <div className="mt-2 rounded-xl border border-border bg-secondary/30 p-4 text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">
+                The cheapest-looking option
+              </span>{" "}
+              ({cheapestHeadlineResult.platform} at S${cheapestHeadlineResult.headline * 2}) costs{" "}
+              <span className="font-medium text-destructive">S${insightDelta} more</span>{" "}
+              at checkout than the best deal.
+            </div>
+          ) : null}
         </div>
       )}
     </section>
