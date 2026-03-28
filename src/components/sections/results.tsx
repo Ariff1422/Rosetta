@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 type AgentStatus = "pending" | "scanning" | "done" | "error";
+type SortMode = "true-total" | "headline" | "largest-gap";
 
 interface Agent {
   name: string;
@@ -45,12 +46,22 @@ interface SearchResponse {
   results: Result[];
   query?: string;
   searchedAt?: string;
+  completedAgents?: number;
+  failedAgents?: number;
 }
 
 interface SearchMetaEvent {
   type: "SEARCH_META";
   query: string;
   activeTargets?: string[];
+  parsedQuery?: {
+    origin?: string | null;
+    destination?: string | null;
+    departDate?: string | null;
+    returnDate?: string | null;
+    pax?: number | null;
+    normalizedQuery?: string;
+  } | null;
 }
 
 interface AgentStartEvent {
@@ -85,6 +96,80 @@ type StreamEventPayload =
     };
 
 const INITIAL_SKELETON_COUNT = 3;
+
+function formatDateLabel(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  return parsed.toLocaleDateString("en-SG", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function buildQuerySummary(
+  query: string,
+  parsedQuery?: SearchMetaEvent["parsedQuery"]
+) {
+  if (!parsedQuery) return query;
+
+  const parts: string[] = [];
+
+  if (parsedQuery.origin && parsedQuery.destination) {
+    parts.push(`${parsedQuery.origin} -> ${parsedQuery.destination}`);
+  } else if (parsedQuery.destination) {
+    parts.push(parsedQuery.destination);
+  } else if (parsedQuery.origin) {
+    parts.push(parsedQuery.origin);
+  }
+
+  if (parsedQuery.departDate && parsedQuery.returnDate) {
+    parts.push(`${formatDateLabel(parsedQuery.departDate)} - ${formatDateLabel(parsedQuery.returnDate)}`);
+  } else if (parsedQuery.departDate) {
+    parts.push(formatDateLabel(parsedQuery.departDate));
+  }
+
+  if (parsedQuery.pax) {
+    parts.push(`${parsedQuery.pax} pax`);
+  }
+
+  if (parts.length === 0 && parsedQuery.normalizedQuery) {
+    return parsedQuery.normalizedQuery;
+  }
+
+  return parts.join(" · ") || query;
+}
+
+function buildPriceExplanation(result: Result, bestTotal: number, pax: number) {
+  if (result.isBest) return null;
+
+  const hiddenFee = (result.breakdown.platformFee ?? 0) + (result.breakdown.serviceFee ?? 0);
+  const baggage = result.breakdown.baggage ?? 0;
+  const premiumVsBest = result.total - bestTotal;
+  const headlineTotal = result.headline * pax;
+
+  if (premiumVsBest <= 0) {
+    return "Matches the best total once checkout fees are included.";
+  }
+
+  if (hiddenFee > 0 && baggage > 0) {
+    return `Looks cheaper upfront, but baggage and checkout fees add S$${hiddenFee + baggage}.`;
+  }
+
+  if (hiddenFee > 0) {
+    return `Looks cheaper upfront, but checkout fees add S$${hiddenFee}.`;
+  }
+
+  if (baggage > 0) {
+    return `Base fare looks low, but baggage adds S$${baggage} before checkout.`;
+  }
+
+  if (headlineTotal < result.total) {
+    return `Advertised at S$${headlineTotal}, but taxes push the true total up by S$${result.total - headlineTotal}.`;
+  }
+
+  return `True checkout price is S$${premiumVsBest} above the best deal.`;
+}
 
 function normalizeResults(results: Result[]): Result[] {
   const sorted = [...results].sort((a, b) => a.total - b.total);
@@ -152,13 +237,16 @@ function applyStreamEvent(
   setAgents: Dispatch<SetStateAction<Agent[]>>,
   setResults: Dispatch<SetStateAction<Result[]>>,
   setError: Dispatch<SetStateAction<string | null>>,
-  setHasCompleted: Dispatch<SetStateAction<boolean>>
+  setHasCompleted: Dispatch<SetStateAction<boolean>>,
+  setResponseMeta: Dispatch<SetStateAction<SearchResponse | null>>,
+  setQuerySummary: Dispatch<SetStateAction<string | null>>
 ) {
   const type = (payload.type ?? payload.event ?? "").toUpperCase();
 
   if (type === "SEARCH_META" && "activeTargets" in payload) {
     const targets = payload.activeTargets ?? [];
     setAgents(targets.map((name) => ({ name, status: "pending" as AgentStatus })));
+    setQuerySummary(buildQuerySummary(payload.query, payload.parsedQuery));
     return;
   }
 
@@ -192,6 +280,7 @@ function applyStreamEvent(
 
   if (type === "SEARCH_DONE" && "response" in payload) {
     setResults(normalizeResults(payload.response.results ?? []));
+    setResponseMeta(payload.response);
     setHasCompleted(true);
     return;
   }
@@ -272,12 +361,14 @@ function ResultCard({
   pax = 2,
   bestTotal,
   worstTotal,
+  explanation,
 }: {
   result: Result;
   rank: number;
   pax?: number;
   bestTotal: number;
   worstTotal: number;
+  explanation: string | null;
 }) {
   const { base, taxes, baggage, platformFee, serviceFee } = result.breakdown;
   const hiddenFee = (platformFee ?? 0) + (serviceFee ?? 0);
@@ -383,6 +474,13 @@ function ResultCard({
           </div>
         )}
 
+        {explanation ? (
+          <div className="rounded-xl border border-border/70 bg-background/60 px-4 py-3 text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">Why this costs more:</span>{" "}
+            {explanation}
+          </div>
+        ) : null}
+
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           {result.isBest && savings > 0 ? (
             <div className="flex items-center gap-1.5 text-sm font-medium text-success">
@@ -414,6 +512,10 @@ export function Results({ query }: { query: string }) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasCompleted, setHasCompleted] = useState(false);
+  const [responseMeta, setResponseMeta] = useState<SearchResponse | null>(null);
+  const [querySummary, setQuerySummary] = useState<string | null>(null);
+  const [sortMode, setSortMode] = useState<SortMode>("true-total");
+  const [showWarningsOnly, setShowWarningsOnly] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -424,6 +526,10 @@ export function Results({ query }: { query: string }) {
       setError(null);
       setIsLoading(true);
       setHasCompleted(false);
+      setResponseMeta(null);
+      setQuerySummary(null);
+      setSortMode("true-total");
+      setShowWarningsOnly(false);
 
       try {
         const response = await fetch("/api/search", {
@@ -442,6 +548,8 @@ export function Results({ query }: { query: string }) {
         if (contentType.includes("application/json")) {
           const payload = (await response.json()) as SearchResponse;
           setResults(normalizeResults(payload.results ?? []));
+          setResponseMeta(payload);
+          setQuerySummary(payload.query ?? query);
           setAgents(
             (payload.results ?? []).map((result) => ({
               name: result.platform,
@@ -471,14 +579,30 @@ export function Results({ query }: { query: string }) {
           for (const block of blocks) {
             const parsed = parseSseBlock(block);
             if (!parsed) continue;
-            applyStreamEvent(parsed.payload, setAgents, setResults, setError, setHasCompleted);
+            applyStreamEvent(
+              parsed.payload,
+              setAgents,
+              setResults,
+              setError,
+              setHasCompleted,
+              setResponseMeta,
+              setQuerySummary
+            );
           }
         }
 
         if (buffer.trim()) {
           const parsed = parseSseBlock(buffer);
           if (parsed) {
-            applyStreamEvent(parsed.payload, setAgents, setResults, setError, setHasCompleted);
+            applyStreamEvent(
+              parsed.payload,
+              setAgents,
+              setResults,
+              setError,
+              setHasCompleted,
+              setResponseMeta,
+              setQuerySummary
+            );
           }
         }
       } catch (err) {
@@ -511,6 +635,30 @@ export function Results({ query }: { query: string }) {
       ? cheapestHeadlineResult.total - bestTotal
       : 0;
   const skeletonCount = Math.max(INITIAL_SKELETON_COUNT - results.length, 0);
+  const totalAgents = agents.length;
+  const errorAgents = agents.filter((agent) => agent.status === "error").length;
+  const completedAgents = responseMeta?.completedAgents ?? doneCount;
+  const failedAgents = responseMeta?.failedAgents ?? errorAgents;
+  const displayedResults = useMemo(() => {
+    const filtered = showWarningsOnly
+      ? results.filter((result) => (result.flags?.length ?? 0) > 0)
+      : results;
+
+    const sorted = [...filtered];
+
+    if (sortMode === "headline") {
+      sorted.sort((a, b) => a.headline - b.headline);
+    } else if (sortMode === "largest-gap") {
+      sorted.sort((a, b) => (b.total - b.headline * 2) - (a.total - a.headline * 2));
+    } else {
+      sorted.sort((a, b) => a.total - b.total);
+    }
+
+    return normalizeResults(sorted);
+  }, [results, showWarningsOnly, sortMode]);
+  const displayedBestTotal = displayedResults[0]?.total ?? 0;
+  const displayedWorstTotal = displayedResults[displayedResults.length - 1]?.total ?? displayedBestTotal;
+  const warningResultCount = results.filter((result) => (result.flags?.length ?? 0) > 0).length;
 
   return (
     <section className="mx-auto max-w-4xl px-6 pb-24 pt-10">
@@ -520,6 +668,17 @@ export function Results({ query }: { query: string }) {
           {query}
         </span>
       </div>
+
+      {querySummary ? (
+        <div className="mb-6 flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-[0.24em] text-muted-foreground/70">
+            Interpreted trip
+          </span>
+          <span className="rounded-full border border-border bg-background px-4 py-1.5 text-sm font-medium text-foreground">
+            {querySummary}
+          </span>
+        </div>
+      ) : null}
 
       <div className="mb-8 rounded-2xl border border-border bg-card p-5 shadow-sm">
         <div className="mb-4 flex items-center justify-between gap-4">
@@ -574,6 +733,28 @@ export function Results({ query }: { query: string }) {
         )}
       </div>
 
+      {hasCompleted && !isLoading ? (
+        <div className="mb-4 rounded-2xl border border-border bg-secondary/20 p-4 text-sm text-muted-foreground">
+          {failedAgents > 0 && completedAgents === 0 ? (
+            <>
+              <span className="font-medium text-foreground">No live results.</span>{" "}
+              All selected platforms timed out, were blocked, or failed before checkout.
+            </>
+          ) : failedAgents > 0 ? (
+            <>
+              <span className="font-medium text-foreground">Partial live coverage.</span>{" "}
+              {completedAgents} platform{completedAgents === 1 ? "" : "s"} returned usable checkout data and{" "}
+              {failedAgents} platform{failedAgents === 1 ? "" : "s"} timed out or were blocked.
+            </>
+          ) : totalAgents > 0 ? (
+            <>
+              <span className="font-medium text-foreground">Live results verified.</span>{" "}
+              All {totalAgents} selected platforms completed successfully.
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
       {error ? (
         <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">
           {error}
@@ -587,15 +768,58 @@ export function Results({ query }: { query: string }) {
             <span className="text-sm text-muted-foreground">Ranked by true price</span>
           </div>
 
+          <div className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs uppercase tracking-[0.2em] text-muted-foreground/70">
+                Sort by
+              </span>
+              {([
+                { value: "true-total", label: "True total" },
+                { value: "headline", label: "Advertised price" },
+                { value: "largest-gap", label: "Biggest gap" },
+              ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setSortMode(option.value)}
+                  className={cn(
+                    "rounded-full px-3 py-1.5 text-sm transition-colors",
+                    sortMode === option.value
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-secondary text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowWarningsOnly((current) => !current)}
+              className={cn(
+                "inline-flex items-center rounded-full px-3 py-1.5 text-sm transition-colors",
+                showWarningsOnly
+                  ? "bg-warning/15 text-warning-foreground ring-1 ring-warning/30"
+                  : "bg-secondary text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {showWarningsOnly
+                ? `Showing warnings only (${warningResultCount})`
+                : `Show warnings only (${warningResultCount})`}
+            </button>
+          </div>
+
           <AnimatePresence initial={false}>
-            {results.map((result, index) => (
+            {displayedResults.map((result, index) => (
               <ResultCard
                 key={result.platform}
                 result={result}
                 rank={index}
                 pax={2}
-                bestTotal={bestTotal}
-                worstTotal={worstTotal}
+                bestTotal={displayedBestTotal}
+                worstTotal={displayedWorstTotal}
+                explanation={buildPriceExplanation(result, displayedBestTotal, 2)}
               />
             ))}
           </AnimatePresence>
@@ -605,9 +829,11 @@ export function Results({ query }: { query: string }) {
               <ResultSkeleton key={`skeleton-${index}`} />
             ))}
 
-          {!isLoading && results.length === 0 ? (
+          {!isLoading && displayedResults.length === 0 ? (
             <div className="rounded-xl border border-border bg-secondary/20 p-4 text-sm text-muted-foreground">
-              No results came back for this query.
+              {showWarningsOnly
+                ? "No results with warning flags matched the current filter."
+                : "No results came back for this query."}
             </div>
           ) : null}
 

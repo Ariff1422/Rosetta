@@ -30,6 +30,8 @@ export interface SearchResponse {
   results: PriceResult[];
   query: string;
   searchedAt: string;
+  completedAgents?: number;
+  failedAgents?: number;
 }
 
 const MAX_TARGETS_PER_SEARCH = 3;
@@ -315,6 +317,7 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       const encoder = new TextEncoder();
       const results: PriceResult[] = [];
+      let failedAgents = 0;
 
       controller.enqueue(
         encoder.encode(
@@ -340,6 +343,7 @@ export async function POST(req: NextRequest) {
               encoder.encode(encodeEvent({ type: "AGENT_DONE", platform: target.name, result })),
             );
           } catch (error) {
+            failedAgents += 1;
             controller.enqueue(
               encoder.encode(
                 encodeEvent({
@@ -354,10 +358,14 @@ export async function POST(req: NextRequest) {
         }),
       );
 
+      const finalResults = rankResults(results);
+
       const response: SearchResponse = {
-        results: rankResults(results),
+        results: finalResults,
         query,
         searchedAt: new Date().toISOString(),
+        completedAgents: results.length,
+        failedAgents,
       };
 
       controller.enqueue(encoder.encode(encodeEvent({ type: "SEARCH_DONE", response })));
