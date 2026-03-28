@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import type { SearchRequestPayload } from "@/lib/search-schema";
 import { cn } from "@/lib/utils";
 
 type AgentStatus = "pending" | "scanning" | "done" | "error";
@@ -46,6 +47,8 @@ interface SearchResponse {
   query?: string;
   searchedAt?: string;
   error?: string;
+  clarifications?: string[];
+  suggestedQuery?: string;
 }
 
 interface SearchMetaEvent {
@@ -409,11 +412,14 @@ function ResultCard({
   );
 }
 
-export function Results({ query }: { query: string }) {
+export function Results({ search }: { search: SearchRequestPayload }) {
+  const query = search.query;
   const [agents, setAgents] = useState<Agent[]>([]);
   const [results, setResults] = useState<Result[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [clarifications, setClarifications] = useState<string[]>([]);
+  const [suggestedQuery, setSuggestedQuery] = useState<string | null>(null);
   const [hasCompleted, setHasCompleted] = useState(false);
 
   useEffect(() => {
@@ -423,6 +429,8 @@ export function Results({ query }: { query: string }) {
       setAgents([]);
       setResults([]);
       setError(null);
+      setClarifications([]);
+      setSuggestedQuery(null);
       setIsLoading(true);
       setHasCompleted(false);
 
@@ -430,16 +438,22 @@ export function Results({ query }: { query: string }) {
         const response = await fetch("/api/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify(search),
           signal: controller.signal,
         });
 
         if (!response.ok) {
           let message = `Search failed with status ${response.status}`;
           try {
-            const payload = (await response.json()) as { error?: string };
+            const payload = (await response.json()) as SearchResponse;
             if (payload.error) {
               message = payload.error;
+            }
+            if (payload.clarifications?.length) {
+              setClarifications(payload.clarifications);
+            }
+            if (payload.suggestedQuery) {
+              setSuggestedQuery(payload.suggestedQuery);
             }
           } catch {
             // Ignore JSON parsing errors and keep the status fallback.
@@ -524,7 +538,7 @@ export function Results({ query }: { query: string }) {
 
     void runSearch();
     return () => controller.abort();
-  }, [query]);
+  }, [query, search]);
 
   const doneCount = agents.filter((agent) => agent.status === "done" || agent.status === "error").length;
   const allDone = hasCompleted || (agents.length > 0 && agents.every((agent) => agent.status === "done" || agent.status === "error") && !isLoading);
@@ -607,7 +621,19 @@ export function Results({ query }: { query: string }) {
 
       {error ? (
         <div className="mb-4 rounded-2xl border border-destructive/20 bg-destructive/5 p-5 text-sm text-destructive">
-          {error}
+          <div className="font-medium">{error}</div>
+          {clarifications.length > 0 ? (
+            <ul className="mt-3 list-disc pl-5 text-sm">
+              {clarifications.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : null}
+          {suggestedQuery ? (
+            <div className="mt-3 rounded-xl border border-destructive/10 bg-background/60 p-3 text-xs text-foreground">
+              <span className="font-medium">Try a more specific query:</span> {suggestedQuery}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

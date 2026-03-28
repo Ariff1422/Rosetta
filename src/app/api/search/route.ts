@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseQuery, type ParsedSearchQuery, type SearchType } from "@/lib/parse-query";
+import type { StructuredSearchPayload } from "@/lib/search-schema";
 
 export const runtime = "nodejs";
 
 export interface SearchPayload {
   query: string;
+  structured?: StructuredSearchPayload;
 }
 
 export interface PriceResult {
@@ -32,8 +34,12 @@ export interface SearchResponse {
   searchedAt: string;
 }
 
-const MAX_TARGETS_PER_SEARCH = 2;
-const AGENT_TIMEOUT_MS = 45_000;
+type ClarificationResponse = {
+  error: string;
+  clarifications: string[];
+  suggestedQuery: string;
+};
+
 const PARSE_TIMEOUT_MS = 2_500;
 const KEEPALIVE_INTERVAL_MS = 5_000;
 
@@ -138,11 +144,31 @@ function inferTypesFromQuery(query: string): SearchType[] {
   return types.length > 0 ? types : ["flights"];
 }
 
+function buildParsedQueryFromStructured(
+  structured: StructuredSearchPayload | undefined,
+  query: string,
+): ParsedSearchQuery | null {
+  if (!structured) return null;
+
+  return {
+    origin: structured.origin?.trim() || null,
+    destination: structured.destination?.trim() || null,
+    departDate: structured.departDate?.trim() || null,
+    returnDate: structured.returnDate?.trim() || null,
+    pax:
+      typeof structured.pax === "number" && Number.isFinite(structured.pax)
+        ? structured.pax
+        : null,
+    types: [structured.type],
+    normalizedQuery: query,
+  };
+}
+
 function getTargets(types: SearchType[]) {
   if (types.length === 1) {
-    if (types[0] === "flights") return FLIGHT_TARGETS.slice(0, MAX_TARGETS_PER_SEARCH);
-    if (types[0] === "hotels") return HOTEL_TARGETS.slice(0, MAX_TARGETS_PER_SEARCH);
-    return CAR_TARGETS.slice(0, MAX_TARGETS_PER_SEARCH);
+    if (types[0] === "flights") return FLIGHT_TARGETS;
+    if (types[0] === "hotels") return HOTEL_TARGETS;
+    return CAR_TARGETS;
   }
 
   const pools: Record<SearchType, SearchTarget[]> = {
@@ -154,7 +180,7 @@ function getTargets(types: SearchType[]) {
   const selected: SearchTarget[] = [];
   let index = 0;
 
-  while (selected.length < MAX_TARGETS_PER_SEARCH) {
+  while (true) {
     let addedInRound = false;
     for (const type of types) {
       const candidate = pools[type][index];
@@ -164,7 +190,6 @@ function getTargets(types: SearchType[]) {
       }
       selected.push(candidate);
       addedInRound = true;
-      if (selected.length >= MAX_TARGETS_PER_SEARCH) break;
     }
 
     if (!addedInRound) break;
@@ -285,6 +310,30 @@ function getMissingFields(query: string, parsedQuery: ParsedSearchQuery | null, 
   return missing;
 }
 
+function buildClarifications(missingFields: string[], travelType: SearchType) {
+  return missingFields.map((field) => {
+    if (field === "origin") return "Where are you departing from?";
+    if (field === "destination") return travelType === "hotels" ? "Which city or area should the hotel be in?" : "Where are you going?";
+    if (field === "pickup location") return "Where do you want to pick up the car?";
+    if (field === "travel date or month") return "What is your departure date or at least the travel month?";
+    if (field === "stay dates or month") return "What are the hotel stay dates or at least the month?";
+    if (field === "pickup date or month") return "What is the pickup date or month?";
+    if (field === "passenger count") return "How many passengers are travelling?";
+    if (field === "guest count") return "How many guests is the hotel for?";
+    return `Please provide ${field}.`;
+  });
+}
+
+function buildSuggestedQuery(query: string, travelType: SearchType) {
+  if (travelType === "hotels") {
+    return `Hotel in Haneda for 3 guests, May 15 to May 27 2026, near the airport. Based on: ${query}`;
+  }
+  if (travelType === "cars") {
+    return `Rental car in Tokyo, pickup May 15 2026, return May 27 2026, 3 travellers. Based on: ${query}`;
+  }
+  return `Flight from Singapore to Haneda, May 15 to May 27 2026, 3 adults, round trip, include 30kg checked baggage for 1 adult on the return flight. Based on: ${query}`;
+}
+
 function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null, preferences: SearchPreferences, hints: QueryHints) {
   const travelType = preferences.travelType;
 
@@ -390,9 +439,6 @@ async function runTinyFishAgent(target: SearchTarget, goal: string): Promise<Tin
     throw new Error("TINYFISH_API_KEY is not configured");
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort("TinyFish agent timed out"), AGENT_TIMEOUT_MS);
-
   try {
     const response = await fetch("https://agent.tinyfish.ai/v1/automation/run-sse", {
       method: "POST",
@@ -406,7 +452,6 @@ async function runTinyFishAgent(target: SearchTarget, goal: string): Promise<Tin
         browser_profile: target.browserProfile,
         api_integration: "rosetta",
       }),
-      signal: controller.signal,
     });
 
     if (!response.ok || !response.body) {
@@ -474,12 +519,7 @@ async function runTinyFishAgent(target: SearchTarget, goal: string): Promise<Tin
 
     return lastResult;
   } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(`Timed out after ${Math.round(AGENT_TIMEOUT_MS / 1000)}s`);
-    }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -559,28 +599,46 @@ export async function POST(req: NextRequest) {
   }
 
   const query = payload?.query;
+  const structured = payload?.structured;
 
   if (!query?.trim()) {
     return NextResponse.json({ error: "Query is required" }, { status: 400 });
   }
 
-  let parsedQuery: ParsedSearchQuery | null = null;
-  try {
-    parsedQuery = await parseQueryWithTimeout(query);
-  } catch {
-    parsedQuery = null;
+  let parsedQuery = buildParsedQueryFromStructured(structured, query);
+  if (!parsedQuery) {
+    try {
+      parsedQuery = await parseQueryWithTimeout(query);
+    } catch {
+      parsedQuery = null;
+    }
   }
 
-  const activeTypes = parsedQuery?.types?.length ? parsedQuery.types : inferTypesFromQuery(query);
+  const activeTypes = structured?.type
+    ? [structured.type]
+    : parsedQuery?.types?.length
+      ? parsedQuery.types
+      : inferTypesFromQuery(query);
   const primaryType = activeTypes[0];
-  const hints = extractQueryHints(query);
+  const baseHints = extractQueryHints(query);
+  const hints = {
+    ...baseHints,
+    origin: structured?.origin?.trim() || baseHints.origin,
+    destination: structured?.destination?.trim() || baseHints.destination,
+    pax: structured?.pax ?? baseHints.pax,
+    dateWindow:
+      structured?.departDate?.trim() || structured?.returnDate?.trim() || baseHints.dateWindow,
+  };
   const missingFields = getMissingFields(query, parsedQuery, primaryType, hints);
   if (missingFields.length > 0) {
+    const clarificationResponse: ClarificationResponse = {
+      error: `Add the missing trip details before searching: ${missingFields.join(", ")}.`,
+      clarifications: buildClarifications(missingFields, primaryType),
+      suggestedQuery: buildSuggestedQuery(query, primaryType),
+    };
     return NextResponse.json(
-      {
-        error: `Add the missing trip details before searching: ${missingFields.join(", ")}.`,
-      },
-      { status: 400 },
+      clarificationResponse,
+      { status: 422 },
     );
   }
 
