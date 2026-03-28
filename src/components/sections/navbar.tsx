@@ -8,21 +8,19 @@ export function Navbar() {
   const { theme, setTheme } = useTheme();
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-border/50 bg-background/95 backdrop-blur-sm">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-        {/* Wordmark — serif, no icon */}
-        <a href="/" className="flex items-baseline gap-0.5">
-          <span className="font-serif text-2xl text-foreground tracking-tight leading-none">
+    <header className="sticky top-0 z-50 w-full border-b border-border/30 bg-background">
+      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-12">
+        {/* Logo */}
+        <a href="/" className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-primary block" />
+          <span className="font-serif text-xl font-bold tracking-tight text-foreground">
             Rosetta
-          </span>
-          <span className="ml-1.5 text-[10px] font-medium uppercase tracking-[0.2em] text-primary opacity-80">
-            beta
           </span>
         </a>
 
         {/* Nav */}
-        <nav className="hidden items-center gap-6 md:flex">
-          {["How it works", "Blog"].map((item) => (
+        <nav className="hidden items-center gap-8 md:flex">
+          {["How it works", "Pricing", "Blog"].map((item) => (
             <a
               key={item}
               href="#"
@@ -43,12 +41,8 @@ export function Navbar() {
             <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
             <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           </button>
-          <Button variant="ghost" size="sm" className="text-sm">
-            Sign in
-          </Button>
-          <Button size="sm" className="text-sm">
-            Try free
-          </Button>
+          <Button variant="ghost" size="sm">Sign in</Button>
+          <Button size="sm">Try for free</Button>
         </div>
       </div>
     </header>
