@@ -60,6 +60,28 @@ cp .env.local .env.local   # add your TINYFISH_API_KEY
 npm run dev
 ```
 
+### Supabase auth and saved history
+
+Add these environment variables:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+TINYFISH_API_KEY=
+OPENAI_API_KEY=
+```
+
+Setup steps:
+- Create a Supabase project
+- Enable Google Auth in `Authentication > Providers`
+- Add `http://localhost:3000/auth/callback` as an authorized redirect URL
+- Run the SQL in [supabase/search_requests.sql](/C:/Users/Ariff1422/Documents/Rosetta/supabase/search_requests.sql)
+
+What this enables:
+- Google sign-in from the navbar
+- Supabase-backed search request history per user
+- Saved requests visible in the hero when the user is signed in
+
 ---
 
 ## Hackathon day checklist

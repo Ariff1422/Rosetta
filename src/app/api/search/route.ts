@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseQuery, type ParsedSearchQuery, type SearchType } from "@/lib/parse-query";
-import type { StructuredSearchPayload } from "@/lib/search-schema";
+import { getSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  buildSectionSearchQuery,
+  type LayoverPreference,
+  type SearchRequestPayload,
+  type SearchSectionsPayload,
+  type StructuredSearchPayload,
+  type TravelSectionPayload,
+} from "@/lib/search-schema";
 
 export const runtime = "nodejs";
 
@@ -10,9 +18,12 @@ export interface SearchPayload {
 }
 
 export interface PriceResult {
+  section: SearchType;
   platform: string;
   platformColor: string;
   platformInitials: string;
+  platformLogoUrl?: string;
+  checkoutUrl?: string;
   route: string;
   detail: string;
   headline: number;
@@ -32,6 +43,9 @@ export interface SearchResponse {
   results: PriceResult[];
   query: string;
   searchedAt: string;
+  completedAgents?: number;
+  failedAgents?: number;
+  savedRequestId?: string;
 }
 
 type ClarificationResponse = {
@@ -39,9 +53,14 @@ type ClarificationResponse = {
   clarifications: string[];
   suggestedQuery: string;
 };
-
 const PARSE_TIMEOUT_MS = 2_500;
 const KEEPALIVE_INTERVAL_MS = 5_000;
+const MAX_TARGETS_SINGLE_TYPE: Record<SearchType, number> = {
+  flights: 4,
+  hotels: 3,
+  cars: 2,
+};
+const MAX_TARGETS_MULTI_TYPE = 2;
 
 const FLIGHT_TARGETS = [
   { url: "https://www.kayak.com", name: "Kayak", color: "#FF690F", initials: "KY", browserProfile: "lite" as const, searchType: "flights" as const },
@@ -79,6 +98,7 @@ type SearchPreferences = {
   tripType: "one-way" | "round-trip";
   cabin: string;
   baggageRequirement: string;
+  layoverPreference: LayoverPreference;
   departDateOrWindow: string;
   returnDateOrWindow: string | null;
 };
@@ -106,6 +126,9 @@ type TinyFishRawResult = {
   room_type?: string | null;
   pickup_time?: string | null;
   route?: string | null;
+  checkout_url?: string | null;
+  current_page_url?: string | null;
+  logo_url?: string | null;
   original_price?: number | null;
   discount_label?: string | null;
 };
@@ -118,9 +141,9 @@ type TinyFishStreamEvent = {
 };
 
 type SearchEvent =
-  | { type: "SEARCH_META"; query: string; parsedQuery: ParsedSearchQuery | null; activeTargets: string[] }
-  | { type: "AGENT_START"; platform: string }
-  | { type: "AGENT_DONE"; platform: string; result: PriceResult | null; error?: string }
+  | { type: "SEARCH_META"; query: string; parsedQuery: ParsedSearchQuery | null; activeTargets: Array<{ platform: string; section: SearchType }> }
+  | { type: "AGENT_START"; platform: string; section: SearchType }
+  | { type: "AGENT_DONE"; platform: string; section: SearchType; result: PriceResult | null; error?: string }
   | { type: "SEARCH_DONE"; response: SearchResponse };
 
 function safeNumber(value: unknown) {
@@ -131,23 +154,14 @@ function inferTypesFromQuery(query: string): SearchType[] {
   const lower = query.toLowerCase();
   const types: SearchType[] = [];
 
-  if (/\b(fly|flight|airfare|plane|airport)\b/.test(lower)) {
-    types.push("flights");
-  }
-  if (/\b(hotel|stay|resort|hostel|room|accommodation)\b/.test(lower)) {
-    types.push("hotels");
-  }
-  if (/\b(car|rental|rent a car|vehicle|pickup)\b/.test(lower)) {
-    types.push("cars");
-  }
+  if (/\b(fly|flight|airfare|plane|airport)\b/.test(lower)) types.push("flights");
+  if (/\b(hotel|stay|resort|hostel|room|accommodation)\b/.test(lower)) types.push("hotels");
+  if (/\b(car|rental|rent a car|vehicle|pickup)\b/.test(lower)) types.push("cars");
 
   return types.length > 0 ? types : ["flights"];
 }
 
-function buildParsedQueryFromStructured(
-  structured: StructuredSearchPayload | undefined,
-  query: string,
-): ParsedSearchQuery | null {
+function buildParsedQueryFromStructured(structured: StructuredSearchPayload | undefined, query: string): ParsedSearchQuery | null {
   if (!structured) return null;
 
   return {
@@ -155,20 +169,54 @@ function buildParsedQueryFromStructured(
     destination: structured.destination?.trim() || null,
     departDate: structured.departDate?.trim() || null,
     returnDate: structured.returnDate?.trim() || null,
-    pax:
-      typeof structured.pax === "number" && Number.isFinite(structured.pax)
-        ? structured.pax
-        : null,
+    pax: typeof structured.pax === "number" && Number.isFinite(structured.pax) ? structured.pax : null,
     types: [structured.type],
     normalizedQuery: query,
   };
 }
 
+function buildParsedQueryFromSection(
+  type: SearchType,
+  section: TravelSectionPayload | undefined,
+  query: string
+): ParsedSearchQuery | null {
+  if (!section) return null;
+
+  return {
+    origin: section.origin?.trim() || null,
+    destination: section.destination?.trim() || null,
+    departDate: section.departDate?.trim() || null,
+    returnDate: section.returnDate?.trim() || null,
+    pax: typeof section.pax === "number" && Number.isFinite(section.pax) ? section.pax : null,
+    types: [type],
+    normalizedQuery: query,
+  };
+}
+
+function getSectionPayload(sections: SearchSectionsPayload | undefined, type: SearchType) {
+  return sections?.[type];
+}
+
+function resolveLayoverPreference(
+  query: string,
+  sectionPayload: TravelSectionPayload | undefined,
+  structured: StructuredSearchPayload | undefined,
+  type: SearchType
+) {
+  if (type !== "flights") return "any" as const;
+  return sectionPayload?.layoverPreference ?? (type === structured?.type ? structured?.layoverPreference : undefined) ?? inferLayoverPreference(query);
+}
+
+function inferActiveTypesFromSections(sections: SearchSectionsPayload | undefined) {
+  const activeTypes = (["flights", "hotels", "cars"] as const).filter((type) => Boolean(sections?.[type]));
+  return activeTypes.length > 0 ? activeTypes : null;
+}
+
 function getTargets(types: SearchType[]) {
   if (types.length === 1) {
-    if (types[0] === "flights") return FLIGHT_TARGETS;
-    if (types[0] === "hotels") return HOTEL_TARGETS;
-    return CAR_TARGETS;
+    if (types[0] === "flights") return FLIGHT_TARGETS.slice(0, MAX_TARGETS_SINGLE_TYPE.flights);
+    if (types[0] === "hotels") return HOTEL_TARGETS.slice(0, MAX_TARGETS_SINGLE_TYPE.hotels);
+    return CAR_TARGETS.slice(0, MAX_TARGETS_SINGLE_TYPE.cars);
   }
 
   const pools: Record<SearchType, SearchTarget[]> = {
@@ -183,15 +231,13 @@ function getTargets(types: SearchType[]) {
   while (true) {
     let addedInRound = false;
     for (const type of types) {
+      if (index >= MAX_TARGETS_MULTI_TYPE) continue;
       const candidate = pools[type][index];
       if (!candidate) continue;
-      if (selected.some((target) => target.name === candidate.name && target.url === candidate.url)) {
-        continue;
-      }
+      if (selected.some((target) => target.name === candidate.name && target.url === candidate.url)) continue;
       selected.push(candidate);
       addedInRound = true;
     }
-
     if (!addedInRound) break;
     index += 1;
   }
@@ -200,16 +246,14 @@ function getTargets(types: SearchType[]) {
 }
 
 function hasDateSignal(query: string) {
-  return /\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december|today|tomorrow|weekend|next week|next month|mid|late|early|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/i.test(
-    query,
-  );
+  return /\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december|today|tomorrow|weekend|next week|next month|mid|late|early|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/i.test(query);
 }
 
 function cleanCapturedLocation(value: string | undefined) {
   if (!value) return null;
   return value
     .replace(/\b(japan|singapore|malaysia|thailand|indonesia)\b/gi, (match) => match)
-    .replace(/\b(from|to|near|airport|the)\b/gi, (segment) => segment.toLowerCase() === "the" ? "" : segment)
+    .replace(/\b(from|to|near|airport|the)\b/gi, (segment) => (segment.toLowerCase() === "the" ? "" : segment))
     .replace(/\s+/g, " ")
     .replace(/^[,\s]+|[,\s]+$/g, "")
     .trim() || null;
@@ -231,11 +275,7 @@ function extractQueryHints(query: string): QueryHints {
 
   const paxValue = paxMatch?.[1] ? Number.parseInt(paxMatch[1], 10) : null;
   const hasOtherAdults = /\b\d+\s+other\s+adults?\b/i.test(query);
-  const passengerCount = paxValue === null || Number.isNaN(paxValue)
-    ? null
-    : hasOtherAdults
-      ? paxValue + 1
-      : paxValue;
+  const passengerCount = paxValue === null || Number.isNaN(paxValue) ? null : hasOtherAdults ? paxValue + 1 : paxValue;
 
   return {
     origin: cleanCapturedLocation(originMatch?.[1]),
@@ -262,19 +302,24 @@ function inferCabin(query: string) {
 function inferBaggageRequirement(query: string) {
   const lower = query.toLowerCase();
   const checkedMatch = lower.match(/(\d+)\s*(kg|kilogram|kilograms)\b/);
-  if (/\b(cabin only|carry[- ]on only|hand carry only|no checked bag)\b/.test(lower)) {
-    return "cabin baggage only";
-  }
+  if (/\b(cabin only|carry[- ]on only|hand carry only|no checked bag)\b/.test(lower)) return "cabin baggage only";
   if (/\bchecked bag|checked baggage|luggage included|with baggage|with luggage\b/.test(lower)) {
-    if (checkedMatch) {
-      return `1 checked bag up to ${checkedMatch[1]}kg`;
-    }
+    if (checkedMatch) return `1 checked bag up to ${checkedMatch[1]}kg`;
     return "1 checked bag";
   }
-  if (checkedMatch) {
-    return `1 checked bag up to ${checkedMatch[1]}kg`;
-  }
+  if (checkedMatch) return `1 checked bag up to ${checkedMatch[1]}kg`;
   return "not specified, do not add bags";
+}
+
+function inferLayoverPreference(query: string) {
+  const lower = query.toLowerCase();
+  if (/\b(non[- ]stop|nonstop|direct only|direct flight only|no layover|without layover)\b/.test(lower)) {
+    return "direct-only" as const;
+  }
+  if (/\b(max(?:imum)?\s*1\s*stop|1 stop max|up to 1 stop|one stop max)\b/.test(lower)) {
+    return "max-1-stop" as const;
+  }
+  return "any" as const;
 }
 
 function buildSearchPreferences(
@@ -282,14 +327,14 @@ function buildSearchPreferences(
   parsedQuery: ParsedSearchQuery | null,
   hints: QueryHints,
   travelType: SearchType,
+  layoverPreference?: LayoverPreference
 ): SearchPreferences {
-  const tripType = inferTripType(query, parsedQuery);
-
   return {
     travelType,
-    tripType,
+    tripType: inferTripType(query, parsedQuery),
     cabin: inferCabin(query),
     baggageRequirement: inferBaggageRequirement(query),
+    layoverPreference: layoverPreference ?? inferLayoverPreference(query),
     departDateOrWindow: parsedQuery?.departDate ?? hints.dateWindow ?? parsedQuery?.normalizedQuery ?? query.trim(),
     returnDateOrWindow: parsedQuery?.returnDate ?? null,
   };
@@ -300,9 +345,7 @@ function getMissingFields(query: string, parsedQuery: ParsedSearchQuery | null, 
   if (!parsedQuery?.destination && !hints.destination) missing.push(travelType === "cars" ? "pickup location" : "destination");
   if (travelType === "flights" && !parsedQuery?.origin && !hints.origin) missing.push("origin");
   if (!parsedQuery?.departDate && !hints.dateWindow && !hasDateSignal(query)) {
-    missing.push(
-      travelType === "hotels" ? "stay dates or month" : travelType === "cars" ? "pickup date or month" : "travel date or month",
-    );
+    missing.push(travelType === "hotels" ? "stay dates or month" : travelType === "cars" ? "pickup date or month" : "travel date or month");
   }
   if (!parsedQuery?.pax && !hints.pax && !/\b\d+\s*(pax|passengers|people|adults|guests|travellers|travelers)\b/i.test(query)) {
     missing.push(travelType === "hotels" ? "guest count" : "passenger count");
@@ -341,7 +384,7 @@ function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null,
     const destination = parsedQuery?.destination ?? hints.destination ?? "not specified";
     const guests = parsedQuery?.pax ?? hints.pax ?? 1;
     const dates = preferences.departDateOrWindow;
-    const hotelSchema = `{"base_fare":120.00,"taxes_and_fees":18.50,"baggage_fee":0,"platform_service_fee":5.00,"service_fee":0,"total_checkout_price":143.50,"property_name":"Sample Hotel","departure_time":"2025-04-15","room_type":"Standard Double","route":"1 night","airline_name":null,"provider_name":null,"vehicle_name":null,"flight_duration":null,"pickup_time":null,"original_price":220.00,"discount_label":"30% off"}`;
+    const hotelSchema = `{"base_fare":120.00,"taxes_and_fees":18.50,"baggage_fee":0,"platform_service_fee":5.00,"service_fee":0,"total_checkout_price":143.50,"property_name":"Sample Hotel","departure_time":"2025-04-15","room_type":"Standard Double","route":"1 night","checkout_url":"https://example.com/checkout","current_page_url":"https://example.com/checkout","logo_url":"https://example.com/favicon.ico","airline_name":null,"provider_name":null,"vehicle_name":null,"flight_duration":null,"pickup_time":null,"original_price":220.00,"discount_label":"30% off"}`;
 
     return [
       `Find the cheapest hotel in ${destination} for ${guests} guest(s) checking in around ${dates}.`,
@@ -359,6 +402,7 @@ function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null,
       "",
       "Return ONLY minified JSON in this exact shape (use real numbers, not strings):",
       hotelSchema,
+      "Also return checkout_url as the exact URL of the final checkout summary page before payment if available, otherwise null. Return current_page_url as the current browser URL on the final page if available, otherwise null. Return logo_url as the site logo or favicon URL if clearly visible, otherwise null.",
       "Set original_price to the crossed-out or 'was' price shown on the page if visible, otherwise null. Set discount_label to the discount badge text (e.g. '30% off') if shown, otherwise null.",
       "If no valid result is found, return the same JSON with 0 for numeric fields and null for string fields.",
     ].join("\n");
@@ -368,7 +412,7 @@ function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null,
     const pickup = parsedQuery?.destination ?? hints.destination ?? "not specified";
     const pickupDate = preferences.departDateOrWindow;
     const returnDate = preferences.returnDateOrWindow ?? "not specified";
-    const carSchema = `{"base_fare":45.00,"taxes_and_fees":8.20,"baggage_fee":0,"platform_service_fee":3.00,"service_fee":0,"total_checkout_price":56.20,"vehicle_name":"Economy Hatchback","pickup_time":"09:00","route":"Economy class","property_name":null,"airline_name":null,"provider_name":"Hertz","flight_duration":null,"departure_time":null,"room_type":null,"original_price":75.00,"discount_label":"40% off"}`;
+    const carSchema = `{"base_fare":45.00,"taxes_and_fees":8.20,"baggage_fee":0,"platform_service_fee":3.00,"service_fee":0,"total_checkout_price":56.20,"vehicle_name":"Economy Hatchback","pickup_time":"09:00","route":"Economy class","checkout_url":"https://example.com/checkout","current_page_url":"https://example.com/checkout","logo_url":"https://example.com/favicon.ico","property_name":null,"airline_name":null,"provider_name":"Hertz","flight_duration":null,"departure_time":null,"room_type":null,"original_price":75.00,"discount_label":"40% off"}`;
 
     return [
       `Find the cheapest rental car available for pickup at ${pickup} from ${pickupDate} to ${returnDate}.`,
@@ -386,12 +430,12 @@ function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null,
       "",
       "Return ONLY minified JSON in this exact shape (use real numbers, not strings):",
       carSchema,
+      "Also return checkout_url as the exact URL of the final checkout summary page before payment if available, otherwise null. Return current_page_url as the current browser URL on the final page if available, otherwise null. Return logo_url as the site logo or favicon URL if clearly visible, otherwise null.",
       "Set original_price to the crossed-out or 'was' price shown on the page if visible, otherwise null. Set discount_label to the discount badge text (e.g. '40% off') if shown, otherwise null.",
       "If no valid result is found, return the same JSON with 0 for numeric fields and null for string fields.",
     ].join("\n");
   }
 
-  // flights
   const origin = parsedQuery?.origin ?? hints.origin ?? "not specified";
   const destination = parsedQuery?.destination ?? hints.destination ?? "not specified";
   const pax = parsedQuery?.pax ?? hints.pax ?? 1;
@@ -400,11 +444,18 @@ function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null,
   const tripType = preferences.tripType;
   const cabin = preferences.cabin;
   const baggage = preferences.baggageRequirement;
-  const flightSchema = `{"base_fare":85.00,"taxes_and_fees":32.50,"baggage_fee":15.00,"platform_service_fee":4.90,"service_fee":0,"total_checkout_price":137.40,"airline_name":"Scoot","flight_duration":"2h 15m","departure_time":"08:45","route":"SIN-BKK","provider_name":null,"property_name":null,"vehicle_name":null,"room_type":null,"pickup_time":null,"original_price":150.00,"discount_label":"50% off"}`;
+  const layovers =
+    preferences.layoverPreference === "direct-only"
+      ? "Direct flights only. Do not choose any itinerary with a stop."
+      : preferences.layoverPreference === "max-1-stop"
+        ? "Allow at most 1 stop. Do not choose any itinerary with 2 or more stops."
+        : "Layovers: any.";
+  const flightSchema = `{"base_fare":85.00,"taxes_and_fees":32.50,"baggage_fee":15.00,"platform_service_fee":4.90,"service_fee":0,"total_checkout_price":137.40,"airline_name":"Scoot","flight_duration":"2h 15m","departure_time":"08:45","route":"SIN-BKK","checkout_url":"https://example.com/checkout","current_page_url":"https://example.com/checkout","logo_url":"https://example.com/favicon.ico","provider_name":null,"property_name":null,"vehicle_name":null,"room_type":null,"pickup_time":null,"original_price":150.00,"discount_label":"50% off"}`;
 
   return [
-    `Find the cheapest ${tripType} ${cabin === "any" ? "" : cabin + " class "}flight from ${origin} to ${destination} departing around ${departDate}${returnDate ? `, returning around ${returnDate}` : ""} for ${pax} passenger(s).`,
+    `Find the cheapest ${tripType} ${cabin === "any" ? "" : `${cabin} class `}flight from ${origin} to ${destination} departing around ${departDate}${returnDate ? `, returning around ${returnDate}` : ""} for ${pax} passenger(s).`,
     `Baggage: ${baggage}.`,
+    layovers,
     "",
     "Steps:",
     `1. Go to the homepage. Dismiss any cookie banner or popup blocking the page.`,
@@ -419,6 +470,7 @@ function buildPrompt(searchQuery: string, parsedQuery: ParsedSearchQuery | null,
     "",
     "Return ONLY minified JSON in this exact shape (use real numbers, not strings):",
     flightSchema,
+    "Also return checkout_url as the exact URL of the final checkout summary page before payment if available, otherwise null. Return current_page_url as the current browser URL on the final page if available, otherwise null. Return logo_url as the site logo or favicon URL if clearly visible, otherwise null.",
     "Set original_price to the crossed-out or 'was' price shown on the page if visible, otherwise null. Set discount_label to the discount badge text (e.g. '50% off') if shown, otherwise null.",
     "If no valid result is found, return the same JSON with 0 for numeric fields and null for string fields.",
   ].join("\n");
@@ -429,8 +481,9 @@ function buildTargetGoal(
   query: string,
   parsedQuery: ParsedSearchQuery | null,
   hints: QueryHints,
+  layoverPreference?: LayoverPreference
 ) {
-  const preferences = buildSearchPreferences(query, parsedQuery, hints, target.searchType);
+  const preferences = buildSearchPreferences(query, parsedQuery, hints, target.searchType, layoverPreference);
   return buildPrompt(parsedQuery?.normalizedQuery || query, parsedQuery, preferences, hints);
 }
 
@@ -500,14 +553,10 @@ async function runTinyFishAgent(target: SearchTarget, goal: string): Promise<Tin
       const messages = buffer.split("\n\n");
       buffer = messages.pop() ?? "";
 
-      for (const message of messages) {
-        parseMessage(message);
-      }
+      for (const message of messages) parseMessage(message);
     }
 
-    if (buffer.trim()) {
-      parseMessage(buffer);
-    }
+    if (buffer.trim()) parseMessage(buffer);
 
     if (terminalStatus && terminalStatus !== "COMPLETED") {
       throw new Error(terminalError || `TinyFish run ended with status ${terminalStatus}`);
@@ -536,6 +585,43 @@ function fallbackDetail(raw: TinyFishRawResult) {
   return raw.property_name || raw.provider_name || raw.airline_name || raw.vehicle_name || "";
 }
 
+function classifyAgentError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  if (lower.includes("timed out") || lower.includes("timeout")) return "Timed out before checkout";
+  if (lower.includes("429")) return "Rate limited by platform or provider";
+  if (lower.includes("403") || lower.includes("access denied")) return "Blocked by platform";
+  if (lower.includes("captcha")) return "Blocked by CAPTCHA";
+  if (lower.includes("login")) return "Stopped at login wall";
+  if (lower.includes("status 5")) return "Platform returned a server error";
+  if (lower.includes("did not return a complete result")) return "No usable checkout result returned";
+
+  return message || "Unknown TinyFish error";
+}
+
+function resolveUrl(value: string | null | undefined, base?: string) {
+  if (!value) return undefined;
+
+  try {
+    return new URL(value, base).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function buildFaviconUrl(target: SearchTarget, checkoutUrl?: string) {
+  const source = resolveUrl(checkoutUrl, target.url) ?? resolveUrl(target.url);
+  if (!source) return undefined;
+
+  try {
+    const origin = new URL(source).origin;
+    return `${origin}/favicon.ico`;
+  } catch {
+    return undefined;
+  }
+}
+
 function formatResult(target: SearchTarget, raw: TinyFishRawResult): PriceResult {
   const base = safeNumber(raw.base_fare);
   const taxes = safeNumber(raw.taxes_and_fees);
@@ -551,14 +637,24 @@ function formatResult(target: SearchTarget, raw: TinyFishRawResult): PriceResult
   if (raw.original_price && raw.discount_label && base > 0) {
     const inflationRatio = raw.original_price / base;
     if (inflationRatio > 1.4) {
-      flags.push(`"${raw.discount_label}" — original price may be inflated`);
+      flags.push(`"${raw.discount_label}" - original price may be inflated`);
     }
   }
 
+  const currentPageUrl = resolveUrl(raw.current_page_url, target.url);
+  const checkoutUrl =
+    resolveUrl(raw.checkout_url, currentPageUrl ?? target.url) ??
+    currentPageUrl ??
+    resolveUrl(target.url);
+  const platformLogoUrl = resolveUrl(raw.logo_url, checkoutUrl ?? target.url) ?? buildFaviconUrl(target, checkoutUrl);
+
   return {
+    section: target.searchType,
     platform: provider ? `${target.name} -> ${provider}` : target.name,
     platformColor: target.color,
     platformInitials: target.initials,
+    platformLogoUrl,
+    checkoutUrl,
     route: raw.route || raw.flight_duration || raw.room_type || raw.vehicle_name || "See checkout details",
     detail: raw.departure_time || raw.pickup_time || fallbackDetail(raw),
     headline: base,
@@ -575,11 +671,19 @@ function formatResult(target: SearchTarget, raw: TinyFishRawResult): PriceResult
 }
 
 function rankResults(results: PriceResult[]) {
-  const ranked = [...results].sort((a, b) => a.total - b.total);
-  if (ranked.length > 0) {
-    ranked[0] = { ...ranked[0], isBest: true };
-  }
-  return ranked;
+  const grouped = results.reduce<Record<SearchType, PriceResult[]>>(
+    (acc, result) => {
+      acc[result.section].push(result);
+      return acc;
+    },
+    { flights: [], hotels: [], cars: [] }
+  );
+
+  return (["flights", "hotels", "cars"] as const).flatMap((section) => {
+    const ranked = [...grouped[section]].sort((a, b) => a.total - b.total);
+    if (ranked.length > 0) ranked[0] = { ...ranked[0], isBest: true };
+    return ranked;
+  });
 }
 
 function encodeEvent(event: SearchEvent) {
@@ -587,25 +691,26 @@ function encodeEvent(event: SearchEvent) {
 }
 
 export async function POST(req: NextRequest) {
-  let payload: SearchPayload | null = null;
+  let payload: SearchRequestPayload | null = null;
 
   try {
-    payload = (await req.json()) as SearchPayload;
+    payload = (await req.json()) as SearchRequestPayload;
   } catch {
-    return NextResponse.json(
-      { error: "Request body must be valid JSON." },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Request body must be valid JSON." }, { status: 400 });
   }
 
   const query = payload?.query;
+  const sections = payload?.sections;
   const structured = payload?.structured;
-
   if (!query?.trim()) {
     return NextResponse.json({ error: "Query is required" }, { status: 400 });
   }
 
-  let parsedQuery = buildParsedQueryFromStructured(structured, query);
+  const sectionTypes = inferActiveTypesFromSections(sections);
+  let parsedQuery =
+    sectionTypes?.length === 1
+      ? buildParsedQueryFromSection(sectionTypes[0], getSectionPayload(sections, sectionTypes[0]), query)
+      : buildParsedQueryFromStructured(structured, query);
   if (!parsedQuery) {
     try {
       parsedQuery = await parseQueryWithTimeout(query);
@@ -614,32 +719,71 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const activeTypes = structured?.type
-    ? [structured.type]
-    : parsedQuery?.types?.length
-      ? parsedQuery.types
-      : inferTypesFromQuery(query);
-  const primaryType = activeTypes[0];
+  const activeTypes =
+    sectionTypes?.length
+      ? sectionTypes
+      : structured?.type
+      ? [structured.type]
+      : parsedQuery?.types?.length
+        ? parsedQuery.types
+        : inferTypesFromQuery(query);
   const baseHints = extractQueryHints(query);
-  const hints = {
-    ...baseHints,
-    origin: structured?.origin?.trim() || baseHints.origin,
-    destination: structured?.destination?.trim() || baseHints.destination,
-    pax: structured?.pax ?? baseHints.pax,
-    dateWindow:
-      structured?.departDate?.trim() || structured?.returnDate?.trim() || baseHints.dateWindow,
-  };
-  const missingFields = getMissingFields(query, parsedQuery, primaryType, hints);
-  if (missingFields.length > 0) {
-    const clarificationResponse: ClarificationResponse = {
-      error: `Add the missing trip details before searching: ${missingFields.join(", ")}.`,
-      clarifications: buildClarifications(missingFields, primaryType),
-      suggestedQuery: buildSuggestedQuery(query, primaryType),
+
+  for (const type of activeTypes) {
+    const sectionPayload = getSectionPayload(sections, type);
+    const scopedQuery = sectionPayload ? buildSectionSearchQuery(type, sectionPayload) : query;
+    const scopedParsedQuery =
+      buildParsedQueryFromSection(type, sectionPayload, scopedQuery) ??
+      (parsedQuery?.types?.includes(type) ? parsedQuery : null);
+    const hints = {
+      ...baseHints,
+      origin: sectionPayload?.origin?.trim() || (type === structured?.type ? structured?.origin?.trim() : "") || baseHints.origin,
+      destination: sectionPayload?.destination?.trim() || (type === structured?.type ? structured?.destination?.trim() : "") || baseHints.destination,
+      pax: sectionPayload?.pax ?? (type === structured?.type ? structured?.pax : undefined) ?? baseHints.pax,
+      dateWindow:
+        sectionPayload?.departDate?.trim() ||
+        sectionPayload?.returnDate?.trim() ||
+        (type === structured?.type ? structured?.departDate?.trim() || structured?.returnDate?.trim() : "") ||
+        baseHints.dateWindow,
     };
-    return NextResponse.json(
-      clarificationResponse,
-      { status: 422 },
-    );
+    const missingFields = getMissingFields(scopedQuery, scopedParsedQuery, type, hints);
+    if (missingFields.length > 0) {
+      const clarificationResponse: ClarificationResponse = {
+        error: `Add the missing ${type} trip details before searching: ${missingFields.join(", ")}.`,
+        clarifications: buildClarifications(missingFields, type),
+        suggestedQuery: buildSuggestedQuery(scopedQuery, type),
+      };
+      return NextResponse.json(clarificationResponse, { status: 422 });
+    }
+  }
+
+  let requestRowId: string | null = null;
+  let authedUserId: string | null = null;
+
+  try {
+    const supabase = await getSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (user) {
+      authedUserId = user.id;
+      const { data } = await supabase
+        .from("search_requests")
+        .insert({
+          user_id: user.id,
+          query,
+          sections: sections ?? structured ?? null,
+          status: "running",
+          result_count: 0,
+        })
+        .select("id")
+        .single();
+
+      requestRowId = data?.id ?? null;
+    }
+  } catch {
+    requestRowId = null;
   }
 
   const activeTargets = getTargets(activeTypes);
@@ -648,8 +792,8 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       const encoder = new TextEncoder();
       const results: PriceResult[] = [];
+      let failedAgents = 0;
 
-      // Send SSE keepalive comments so the local dev server doesn't drop the connection
       const keepalive = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": keepalive\n\n"));
@@ -665,46 +809,107 @@ export async function POST(req: NextRequest) {
               type: "SEARCH_META",
               query,
               parsedQuery,
-              activeTargets: activeTargets.map((target) => target.name),
-            }),
-          ),
+              activeTargets: activeTargets.map((target) => ({ platform: target.name, section: target.searchType })),
+            })
+          )
         );
 
         await Promise.all(
           activeTargets.map(async (target) => {
-            controller.enqueue(encoder.encode(encodeEvent({ type: "AGENT_START", platform: target.name })));
+            const sectionPayload = getSectionPayload(sections, target.searchType);
+            const sectionQuery = sectionPayload ? buildSectionSearchQuery(target.searchType, sectionPayload) : query;
+            const sectionParsedQuery =
+              buildParsedQueryFromSection(target.searchType, sectionPayload, sectionQuery) ??
+              (parsedQuery?.types?.includes(target.searchType) ? parsedQuery : null);
+            const scopedHints = {
+              ...baseHints,
+              origin:
+                sectionPayload?.origin?.trim() ||
+                (target.searchType === structured?.type ? structured?.origin?.trim() : "") ||
+                baseHints.origin,
+              destination:
+                sectionPayload?.destination?.trim() ||
+                (target.searchType === structured?.type ? structured?.destination?.trim() : "") ||
+                baseHints.destination,
+              pax:
+                sectionPayload?.pax ??
+                (target.searchType === structured?.type ? structured?.pax : undefined) ??
+                baseHints.pax,
+              dateWindow:
+                sectionPayload?.departDate?.trim() ||
+                sectionPayload?.returnDate?.trim() ||
+                (target.searchType === structured?.type
+                  ? structured?.departDate?.trim() || structured?.returnDate?.trim()
+                  : "") ||
+                baseHints.dateWindow,
+            };
+            const layoverPreference = resolveLayoverPreference(sectionQuery, sectionPayload, structured, target.searchType);
+
+            controller.enqueue(
+              encoder.encode(encodeEvent({ type: "AGENT_START", platform: target.name, section: target.searchType }))
+            );
 
             try {
-              const goal = buildTargetGoal(target, query, parsedQuery, hints);
+              const goal = buildTargetGoal(target, sectionQuery, sectionParsedQuery, scopedHints, layoverPreference);
               const raw = await runTinyFishAgent(target, goal);
               const result = formatResult(target, raw);
               if (result.total > 0) {
                 results.push(result);
+              } else {
+                failedAgents += 1;
               }
 
-              controller.enqueue(
-                encoder.encode(encodeEvent({ type: "AGENT_DONE", platform: target.name, result })),
-              );
-            } catch (error) {
               controller.enqueue(
                 encoder.encode(
                   encodeEvent({
                     type: "AGENT_DONE",
                     platform: target.name,
+                    section: target.searchType,
+                    result: result.total > 0 ? result : null,
+                  })
+                )
+              );
+            } catch (error) {
+              failedAgents += 1;
+              controller.enqueue(
+                encoder.encode(
+                  encodeEvent({
+                    type: "AGENT_DONE",
+                    platform: target.name,
+                    section: target.searchType,
                     result: null,
-                    error: error instanceof Error ? error.message : "Unknown TinyFish error",
-                  }),
-                ),
+                    error: classifyAgentError(error),
+                  })
+                )
               );
             }
-          }),
+          })
         );
 
         const response: SearchResponse = {
           results: rankResults(results),
           query,
           searchedAt: new Date().toISOString(),
+          completedAgents: results.length,
+          failedAgents,
+          savedRequestId: requestRowId ?? undefined,
         };
+
+        if (requestRowId && authedUserId) {
+          try {
+            const supabase = await getSupabaseServerClient();
+            await supabase
+              .from("search_requests")
+              .update({
+                status: results.length > 0 ? (failedAgents > 0 ? "partial" : "completed") : "failed",
+                result_count: results.length,
+              })
+              .eq("id", requestRowId)
+              .eq("user_id", authedUserId);
+          } catch {
+            // Ignore persistence failures so SSE can complete.
+          }
+        }
 
         controller.enqueue(encoder.encode(encodeEvent({ type: "SEARCH_DONE", response })));
       } finally {
