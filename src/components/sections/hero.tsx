@@ -7,6 +7,7 @@ import {
   Plane,
   Hotel,
   Car,
+  Loader2,
   ShieldCheck,
   Activity,
   Clock,
@@ -25,6 +26,17 @@ import {
   type TravelType,
 } from "@/lib/search-schema";
 import { cn } from "@/lib/utils";
+
+type InputMode = "structured" | "prompt";
+
+type PlanSearchResponse = {
+  query: string;
+  normalizedQuery: string;
+  sections: SearchSectionsPayload;
+  missingFields?: string[];
+  clarifications?: string[];
+  message?: string;
+};
 
 const SECTION_CONFIG: Array<{
   type: TravelType;
@@ -283,8 +295,14 @@ function SectionCard({
 }
 
 export function Hero({ onSearch }: { onSearch?: (payload: SearchRequestPayload) => void }) {
+  const [inputMode, setInputMode] = useState<InputMode>("structured");
   const [sections, setSections] = useState<SearchSectionsPayload>(INITIAL_SECTIONS);
+  const [promptQuery, setPromptQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [plannerBusy, setPlannerBusy] = useState(false);
+  const [plannerQuestions, setPlannerQuestions] = useState<string[]>([]);
+  const [plannerMissingFields, setPlannerMissingFields] = useState<string[]>([]);
+  const [plannerPreview, setPlannerPreview] = useState<string | null>(null);
   const { history, push } = useSearchHistory();
   const { user, history: accountHistory } = useAccountHistory();
 
@@ -351,9 +369,68 @@ export function Hero({ onSearch }: { onSearch?: (payload: SearchRequestPayload) 
       },
     });
     setError(null);
+    setPlannerQuestions([]);
+    setPlannerMissingFields([]);
+    setPlannerPreview(null);
   };
 
   const handleSearch = () => {
+    if (inputMode === "prompt") {
+      if (!promptQuery.trim()) {
+        setError("Write your trip request first.");
+        return;
+      }
+
+      if (!onSearch) {
+        setError("Search is unavailable.");
+        return;
+      }
+
+      setPlannerBusy(true);
+      setError(null);
+      setPlannerQuestions([]);
+      setPlannerMissingFields([]);
+
+      void (async () => {
+        try {
+          const response = await fetch("/api/plan-search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: promptQuery.trim() }),
+          });
+
+          const payload = (await response.json()) as PlanSearchResponse;
+          if (payload.sections) {
+            setSections(payload.sections);
+            setPlannerPreview(payload.normalizedQuery);
+          }
+
+          if (response.status === 422) {
+            setPlannerMissingFields(payload.missingFields ?? []);
+            setPlannerQuestions(payload.clarifications ?? []);
+            setError(payload.message ?? "Add the missing trip details and try again.");
+            return;
+          }
+
+          if (!response.ok) {
+            throw new Error("Unable to analyse the prompt right now.");
+          }
+
+          push(promptQuery.trim());
+          setPlannerQuestions([]);
+          setPlannerMissingFields([]);
+          setError(null);
+          onSearch({ query: promptQuery.trim(), sections: payload.sections });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Unable to analyse the prompt right now.";
+          setError(message);
+        } finally {
+          setPlannerBusy(false);
+        }
+      })();
+      return;
+    }
+
     if (activeCount === 0) {
       setError("Enable at least one section before searching.");
       return;
@@ -373,6 +450,9 @@ export function Hero({ onSearch }: { onSearch?: (payload: SearchRequestPayload) 
     const query = buildSearchQuery(trimmedSections);
     push(query);
     setError(null);
+    setPlannerQuestions([]);
+    setPlannerMissingFields([]);
+    setPlannerPreview(null);
     onSearch({ query, sections: trimmedSections });
   };
 
@@ -407,7 +487,7 @@ export function Hero({ onSearch }: { onSearch?: (payload: SearchRequestPayload) 
           className="mx-auto mb-12 max-w-[720px] text-lg font-light leading-relaxed text-muted-foreground"
         >
           Fill the sections you care about. Rosetta will split them into separate live searches so flights,
-          hotels, and cars do not slow each other down.
+          hotels, and cars do not slow each other down. Or start with a prompt and let Rosetta turn it into a search plan.
         </motion.p>
 
         <motion.div
@@ -417,45 +497,132 @@ export function Hero({ onSearch }: { onSearch?: (payload: SearchRequestPayload) 
           transition={{ duration: 0.4, delay: 0.45 }}
           className="mx-auto rounded-3xl border border-border bg-card p-6 text-left shadow-[0_8px_40px_rgba(0,0,0,0.1)]"
         >
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium text-foreground">Trip planner</div>
-              <div className="text-sm text-muted-foreground">Enable one or more sections, then search them together.</div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <span className="rounded-full bg-secondary px-3 py-1.5 text-xs text-muted-foreground">
-                {activeCount} section{activeCount === 1 ? "" : "s"} active
-              </span>
+          <div className="mb-5 flex flex-wrap items-center gap-2">
+            {([
+              { value: "structured", label: "Structured form" },
+              { value: "prompt", label: "Natural language" },
+            ] as const).map((mode) => (
               <button
+                key={mode.value}
                 type="button"
-                onClick={applyExample}
-                className="rounded-full border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                  onClick={() => {
+                    setInputMode(mode.value);
+                    setError(null);
+                    setPlannerQuestions([]);
+                    setPlannerMissingFields([]);
+                  }}
+                className={cn(
+                  "rounded-full px-3 py-1.5 text-sm transition-colors",
+                  inputMode === mode.value ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground"
+                )}
               >
-                Fill example trip
+                {mode.label}
               </button>
-            </div>
-          </div>
-
-          <div className="grid gap-4 xl:grid-cols-3">
-            {SECTION_CONFIG.map(({ type, label, icon, summary }) => (
-              <div key={type} className="space-y-2">
-                <div className="px-1 text-xs text-muted-foreground">{summary}</div>
-                <SectionCard
-                  type={type}
-                  label={label}
-                  icon={icon}
-                  value={ensureSectionValue(sections[type])}
-                  enabled={Boolean(sections[type])}
-                  onToggle={() => toggleSection(type)}
-                  onChange={(key, value) => updateSection(type, key, value)}
-                />
-              </div>
             ))}
           </div>
 
-          <div className="mt-5 rounded-2xl border border-border/70 bg-secondary/20 px-4 py-3 text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">Search preview:</span> {queryLabel || "Enable a section to start building the search."}
-          </div>
+          {inputMode === "prompt" ? (
+            <>
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Prompt planner</div>
+                  <div className="text-sm text-muted-foreground">Write the trip like a normal request. Rosetta will analyse it, ask for anything missing, then launch the live search.</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPromptQuery("Fly from Singapore to Haneda on May 15 2026, return May 27 2026 for 3 adults. Book a hotel near Haneda Airport for the same dates and find a rental car with automatic transmission.");
+                    setError(null);
+                    setPlannerQuestions([]);
+                    setPlannerMissingFields([]);
+                  }}
+                  className="rounded-full border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                >
+                  Fill example prompt
+                </button>
+              </div>
+
+              <Textarea
+                value={promptQuery}
+                onChange={(e) => setPromptQuery(e.target.value)}
+                placeholder="Example: I want to fly from Singapore to Haneda from May 15 to May 27 2026 for 3 adults, stay near the airport, and rent an automatic car for the same dates."
+                className="min-h-[150px] resize-none rounded-2xl border-border bg-background px-4 py-4 text-sm leading-relaxed focus-visible:ring-primary placeholder:text-muted-foreground/50"
+                rows={6}
+              />
+
+              {plannerPreview ? (
+                <div className="mt-4 rounded-2xl border border-border/70 bg-secondary/20 px-4 py-3 text-sm text-muted-foreground">
+                  <span className="font-medium text-foreground">Interpreted plan:</span> {plannerPreview}
+                </div>
+              ) : null}
+
+              {plannerMissingFields.length > 0 ? (
+                <div className="mt-4 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-foreground">
+                  <div className="mb-2 font-medium text-destructive">Missing fields</div>
+                  <div className="flex flex-wrap gap-2">
+                    {plannerMissingFields.map((field) => (
+                      <span key={field} className="rounded-full border border-destructive/20 bg-background px-3 py-1 text-xs text-destructive">
+                        {field}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {plannerQuestions.length > 0 ? (
+                <div className="mt-4 rounded-xl border border-warning/20 bg-warning/5 px-4 py-3 text-sm text-foreground">
+                  <div className="mb-2 font-medium">Rosetta still needs:</div>
+                  <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                    {plannerQuestions.map((question) => (
+                      <li key={question}>{question}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Trip planner</div>
+                  <div className="text-sm text-muted-foreground">Enable one or more sections, then search them together.</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full bg-secondary px-3 py-1.5 text-xs text-muted-foreground">
+                    {activeCount} section{activeCount === 1 ? "" : "s"} active
+                  </span>
+                  <button
+                    type="button"
+                    onClick={applyExample}
+                    className="rounded-full border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                  >
+                    Fill example trip
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-3">
+                {SECTION_CONFIG.map(({ type, label, icon, summary }) => (
+                  <div key={type} className="space-y-2">
+                    <div className="px-1 text-xs text-muted-foreground">{summary}</div>
+                    <SectionCard
+                      type={type}
+                      label={label}
+                      icon={icon}
+                      value={ensureSectionValue(sections[type])}
+                      enabled={Boolean(sections[type])}
+                      onToggle={() => toggleSection(type)}
+                      onChange={(key, value) => updateSection(type, key, value)}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 rounded-2xl border border-border/70 bg-secondary/20 px-4 py-3 text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">Search preview:</span> {queryLabel || "Enable a section to start building the search."}
+              </div>
+            </>
+          )}
 
           {error ? (
             <div className="mt-4 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
@@ -465,11 +632,13 @@ export function Hero({ onSearch }: { onSearch?: (payload: SearchRequestPayload) 
 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm text-muted-foreground">
-              The more complete the fields are, the less time the agents waste guessing.
+              {inputMode === "prompt"
+                ? "The more specific the prompt is, the fewer follow-up questions Rosetta needs before searching."
+                : "The more complete the fields are, the less time the agents waste guessing."}
             </div>
-            <Button onClick={handleSearch} size="default" className="shrink-0 gap-2">
-              <Search className="h-4 w-4" />
-              Find true price
+            <Button onClick={handleSearch} size="default" className="shrink-0 gap-2" disabled={plannerBusy}>
+              {plannerBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              {inputMode === "prompt" ? "Analyse and search" : "Find true price"}
             </Button>
           </div>
 

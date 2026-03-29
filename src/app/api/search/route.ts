@@ -55,13 +55,6 @@ type ClarificationResponse = {
 };
 const PARSE_TIMEOUT_MS = 2_500;
 const KEEPALIVE_INTERVAL_MS = 5_000;
-const MAX_TARGETS_SINGLE_TYPE: Record<SearchType, number> = {
-  flights: 4,
-  hotels: 3,
-  cars: 2,
-};
-const MAX_TARGETS_MULTI_TYPE = 2;
-
 const FLIGHT_TARGETS = [
   { url: "https://www.kayak.com", name: "Kayak", color: "#FF690F", initials: "KY", browserProfile: "lite" as const, searchType: "flights" as const },
   { url: "https://www.skyscanner.com", name: "Skyscanner", color: "#0770CD", initials: "SK", browserProfile: "lite" as const, searchType: "flights" as const },
@@ -214,9 +207,9 @@ function inferActiveTypesFromSections(sections: SearchSectionsPayload | undefine
 
 function getTargets(types: SearchType[]) {
   if (types.length === 1) {
-    if (types[0] === "flights") return FLIGHT_TARGETS.slice(0, MAX_TARGETS_SINGLE_TYPE.flights);
-    if (types[0] === "hotels") return HOTEL_TARGETS.slice(0, MAX_TARGETS_SINGLE_TYPE.hotels);
-    return CAR_TARGETS.slice(0, MAX_TARGETS_SINGLE_TYPE.cars);
+    if (types[0] === "flights") return [...FLIGHT_TARGETS];
+    if (types[0] === "hotels") return [...HOTEL_TARGETS];
+    return [...CAR_TARGETS];
   }
 
   const pools: Record<SearchType, SearchTarget[]> = {
@@ -231,7 +224,6 @@ function getTargets(types: SearchType[]) {
   while (true) {
     let addedInRound = false;
     for (const type of types) {
-      if (index >= MAX_TARGETS_MULTI_TYPE) continue;
       const candidate = pools[type][index];
       if (!candidate) continue;
       if (selected.some((target) => target.name === candidate.name && target.url === candidate.url)) continue;
